@@ -51,6 +51,8 @@ struct FrameUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct Instance {
     model: [[f32; 4]; 4],
+    /// Transform from the previous frame, used for object motion vectors.
+    previous_model: [[f32; 4]; 4],
     base_color: [f32; 4],
     /// x: metallic, y: roughness, z: ambient occlusion, w: unused.
     material: [f32; 4],
@@ -1119,10 +1121,12 @@ pub(crate) fn build_scene() -> Vec<Instance> {
     ];
 
     // A single flat cube acts as the ground plane.
+    let ground_model = (Mat4::from_translation(Vec3::new(0.0, -0.85, 0.0))
+        * Mat4::from_scale(Vec3::new(14.0, 0.2, 14.0)))
+    .to_cols_array_2d();
     instances.push(Instance {
-        model: (Mat4::from_translation(Vec3::new(0.0, -0.85, 0.0))
-            * Mat4::from_scale(Vec3::new(14.0, 0.2, 14.0)))
-        .to_cols_array_2d(),
+        model: ground_model,
+        previous_model: ground_model,
         base_color: [0.12, 0.13, 0.15, 1.0],
         material: [0.0, 0.92, 1.0, 0.0],
     });
@@ -1136,15 +1140,17 @@ pub(crate) fn build_scene() -> Vec<Instance> {
                 -0.75 + height * 0.5,
                 z as f32 * GRID_SPACING,
             );
-            let model =
-                Mat4::from_translation(position) * Mat4::from_scale(Vec3::new(0.52, height, 0.52));
+            let model = (Mat4::from_translation(position)
+                * Mat4::from_scale(Vec3::new(0.52, height, 0.52)))
+            .to_cols_array_2d();
 
             let cool = (z + GRID_HALF_EXTENT) as f32 / (GRID_HALF_EXTENT * 2) as f32;
             let metallic = pattern as f32 / 4.0 * 0.85;
             let roughness = 0.18 + cool * 0.65;
             let color = PALETTE[(x * 3 + z * 5).rem_euclid(PALETTE.len() as i32) as usize];
             instances.push(Instance {
-                model: model.to_cols_array_2d(),
+                model,
+                previous_model: model,
                 base_color: [color[0], color[1], color[2], 1.0],
                 material: [metallic, roughness, 1.0, 0.0],
             });
@@ -1266,12 +1272,14 @@ pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance),
         return Err(RenderError::Obj(format!("{location}: degenerate bounds")));
     }
     let scale = 5.0 / largest;
-    let model = Mat4::from_translation(Vec3::new(0.0, 1.6, 0.0))
+    let model = (Mat4::from_translation(Vec3::new(0.0, 1.6, 0.0))
         * Mat4::from_rotation_y(std::f32::consts::PI)
         * Mat4::from_scale(Vec3::splat(scale))
-        * Mat4::from_translation(-center);
+        * Mat4::from_translation(-center))
+    .to_cols_array_2d();
     let instance = Instance {
-        model: model.to_cols_array_2d(),
+        model,
+        previous_model: model,
         base_color: [0.06, 0.16, 0.5, 1.0],
         material: [0.18, 0.36, 1.0, 0.0],
     };

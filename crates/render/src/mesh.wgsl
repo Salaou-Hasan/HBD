@@ -14,6 +14,7 @@ struct Frame {
 
 struct Instance {
     model: mat4x4<f32>,
+    previous_model: mat4x4<f32>,
     base_color: vec4<f32>,
     material: vec4<f32>, // metallic, roughness, ao, unused
 };
