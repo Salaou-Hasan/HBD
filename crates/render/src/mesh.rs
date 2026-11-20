@@ -66,9 +66,9 @@ pub(crate) struct MeshPass {
     index_buffer: GpuBuffer,
     // Kept alive for the lifetime of the descriptor set; not read after setup.
     _instance_buffer: GpuBuffer,
+    /// GPU-readable draw parameters for `vkCmdDrawIndexedIndirect`.
+    indirect_buffer: GpuBuffer,
     uniform_buffer: GpuBuffer,
-    index_count: u32,
-    instance_count: u32,
 }
 
 impl MeshPass {
@@ -297,6 +297,18 @@ impl MeshPass {
             bytemuck::cast_slice(&instances),
             "HBD instance buffer",
         )?;
+        let draw = [
+            indices.len() as u32,
+            instances.len() as u32,
+            0u32,
+            0u32,
+            0u32,
+        ];
+        let indirect_buffer = context.upload_buffer(
+            vk::BufferUsageFlags::INDIRECT_BUFFER,
+            bytemuck::cast_slice(&draw),
+            "HBD indirect draw",
+        )?;
         let uniform_buffer = context.create_buffer(
             size_of::<FrameUniform>() as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
@@ -408,9 +420,8 @@ impl MeshPass {
             vertex_buffer,
             index_buffer,
             _instance_buffer: instance_buffer,
+            indirect_buffer,
             uniform_buffer,
-            index_count: indices.len() as u32,
-            instance_count: instances.len() as u32,
         })
     }
 
@@ -502,12 +513,14 @@ impl MeshPass {
                 0,
                 vk::IndexType::UINT32,
             );
-            self.device.cmd_draw_indexed(
+            // One indirect draw: the GPU reads index/instance counts from a
+            // buffer, so future compute culling can write the draw without a
+            // CPU round trip. No visual change from the previous direct draw.
+            self.device.cmd_draw_indexed_indirect(
                 command_buffer,
-                self.index_count,
-                self.instance_count,
+                self.indirect_buffer.buffer(),
                 0,
-                0,
+                1,
                 0,
             );
         }

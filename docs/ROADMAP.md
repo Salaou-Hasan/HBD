@@ -62,7 +62,11 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 
 Delivered so far: GPU timestamp profiler with CSV export and percentile reports; explicit pass cache with per-image validity and `--no-cache` A/B; resize dedupe. Measured on the Intel dev GPU: static-camera GPU frame p50 **4.074 ms → 0.645 ms** (6.3x) with pixel-identical output; moving camera unchanged (~4.1 ms) and no regression. A precomputed-SSAO-sample experiment was measured as a regression and reverted. Full numbers and the no-hidden-operations rule are in [PROFILING.md](PROFILING.md) and [ADR 0004](adr/0004-visible-operations.md).
 
-Remaining M2 work: GPU-driven indirect/multi-draw (1M items), 10M+ visible triangles, bindless materials, p99 regression dashboard, motion vectors for HBTR with dynamic objects.
+Remaining M2 work: GPU-driven indirect/multi-draw scale-up (1M items), 10M+ visible triangles, bindless materials, p99 regression dashboard, motion vectors for HBTR with dynamic objects.
+
+**Motion-vector attempt (reverted):** a velocity attachment and HBTR velocity transform were implemented but produced corrupted imagery even with AA disabled, so the whole attempt was reverted to the last clean commit. No half-working code is left in the tree.
+
+**Indirect draw delivered:** `MeshPass` now issues one `vkCmdDrawIndexedIndirect` with counts from a GPU buffer instead of a CPU-side direct draw. Before/after captures at the same camera pose are pixel-identical (mean diff 0), so this is a pure plumbing change that removes the CPU draw-parameter path and gives compute culling a place to write.
 
 ---
 
