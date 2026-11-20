@@ -58,6 +58,12 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 | 1440p / 60 fps on RTX 3060-class | ⏳ needs target GPU |
 | No frame over 16.6 ms on a 60 s camera path | ⏳ needs target GPU |
 
+### M2 work started — E2E profiler and first optimizations
+
+Delivered so far: GPU timestamp profiler with CSV export and percentile reports; explicit pass cache with per-image validity and `--no-cache` A/B; resize dedupe. Measured on the Intel dev GPU: static-camera GPU frame p50 **4.074 ms → 0.645 ms** (6.3x) with pixel-identical output; moving camera unchanged (~4.1 ms) and no regression. A precomputed-SSAO-sample experiment was measured as a regression and reverted. Full numbers and the no-hidden-operations rule are in [PROFILING.md](PROFILING.md) and [ADR 0004](adr/0004-visible-operations.md).
+
+Remaining M2 work: GPU-driven indirect/multi-draw (1M items), 10M+ visible triangles, bindless materials, p99 regression dashboard, TAA redesign/custom AA.
+
 ---
 
 ## M2 — Performance and GPU-driven rendering

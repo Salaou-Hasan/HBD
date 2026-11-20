@@ -1,5 +1,9 @@
 # Contributing to HBD
 
+## The strict rule: no hidden operations
+
+Every optimization must be observable. Log every skip, cache hit, cache invalidation, mode toggle, fallback, and report write; provide an A/B switch for behavior that changes what work is done. Unsupported capabilities must be reported, never silently substituted. An optimization that measures worse is reverted, not kept. See [PROFILING.md](PROFILING.md) and [ADR 0004](adr/0004-visible-operations.md). Review profiler output and logs, not just the final image.
+
 ## Before you change code
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the library/editor boundary, [RENDERER.md](RENDERER.md) before touching rendering, and [ROADMAP.md](ROADMAP.md) to see whether the work belongs to the current milestone.

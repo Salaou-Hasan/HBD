@@ -11,6 +11,8 @@ HBD is a Windows-first, multithreaded 3D game engine written in Rust. It is buil
 - **Debug views** for every major buffer, selected with number keys `0`–`7` in the sandbox.
 - **Validation sandbox** with an orbiting camera, a fixed-camera mode, a frame limit, and a Vulkan probe mode.
 - **Stable configuration layer** for the job system, runtime tick, asset streaming budgets, physics, scripting, and renderer options, each covered by unit tests.
+- **E2E profiler** with GPU timestamp queries, per-pass p50/p95/p99, and CSV export (`--profile`). All operations are logged; see [PROFILING.md](docs/PROFILING.md) and [ADR 0004](docs/adr/0004-visible-operations.md).
+- **Visible offscreen pass cache**: with an unchanged camera pose, shadow/geometry/SSAO/bloom are skipped per swapchain image (6.3x GPU reduction in static mode), with `--no-cache` as A/B control.
 - **CI** on Windows runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test --workspace`.
 
 TAA is implemented but **currently disabled in the M1 runtime** (`TAA_ENABLED = false` in `crates/render/src/renderer.rs`) because it produced artifacts. SSAO and AgX are active and were not removed. Path tracing is research-only and off by default. See [RENDERER.md](docs/RENDERER.md) and [ADR 0003](docs/adr/0003-taa-disabled.md).
@@ -85,9 +87,10 @@ Downstream code should depend on `hbd-engine` only. Internal `hbd-*` crates may 
 - [ROADMAP.md](docs/ROADMAP.md) — milestones, deliverables, exit criteria.
 - [BUILDING.md](docs/BUILDING.md) — setup, commands, sandbox flags, troubleshooting.
 - [EARLY-OBJ-TEST.md](docs/EARLY-OBJ-TEST.md) — temporary `--obj` hook for seeing a real mesh in the renderer (not the asset pipeline).
+- [PROFILING.md](docs/PROFILING.md) — E2E profiler, measured baseline/after results, A/B procedure, rejected experiment.
 - [CONTRIBUTING.md](docs/CONTRIBUTING.md) — conventions and quality gate.
 - [visual-target.md](docs/visual-target.md) — the visual quality bar and M1 acceptance tests.
-- [ADR 0001 — stack](docs/adr/0001-stack.md), [0002 — editor boundary](docs/adr/0002-editor-boundary.md), [0003 — TAA disabled](docs/adr/0003-taa-disabled.md).
+- [ADR 0001 — stack](docs/adr/0001-stack.md), [0002 — editor boundary](docs/adr/0002-editor-boundary.md), [0003 — TAA disabled](docs/adr/0003-taa-disabled.md), [0004 — no hidden operations](docs/adr/0004-visible-operations.md).
 
 ## Design targets
 

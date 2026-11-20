@@ -14,6 +14,7 @@ use thiserror::Error;
 mod bloom;
 mod camera;
 mod mesh;
+mod profiler;
 mod render_targets;
 mod renderer;
 pub mod shader;

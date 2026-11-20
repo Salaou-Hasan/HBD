@@ -17,6 +17,19 @@ struct Sandbox {
     renderer: Option<Renderer>,
     static_camera: bool,
     obj_path: Option<PathBuf>,
+    profile: bool,
+    profile_path: Option<PathBuf>,
+    profile_interval: u32,
+    no_cache: bool,
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        if let Some(renderer) = self.renderer.as_ref() {
+            info!("sandbox shutting down: finalizing profiler explicitly");
+            renderer.finish_profiling();
+        }
+    }
 }
 
 impl PlatformHandler for Sandbox {
@@ -41,12 +54,24 @@ impl PlatformHandler for Sandbox {
             None => Renderer::new(context),
         };
         match renderer {
-            Ok(renderer) => {
+            Ok(mut renderer) => {
                 info!(
                     extent = ?renderer.swapchain_extent(),
                     format = ?renderer.swapchain_format(),
                     "renderer ready"
                 );
+                if self.profile {
+                    if let Err(error) =
+                        renderer.enable_profiling(self.profile_path.clone(), self.profile_interval)
+                    {
+                        error!(%error, "failed to enable E2E profiler");
+                    } else {
+                        info!("E2E profiler requested via --profile");
+                    }
+                } else {
+                    info!("E2E profiler not requested; no GPU timestamps recorded");
+                }
+                renderer.set_pass_cache_enabled(!self.no_cache);
                 self.renderer = Some(renderer);
             }
             Err(error) => {
@@ -182,6 +207,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .windows(2)
         .find(|pair| pair[0] == "--obj")
         .map(|pair| PathBuf::from(&pair[1]));
+    let profile = args.iter().any(|arg| arg == "--profile");
+    let profile_path = args
+        .windows(2)
+        .find(|pair| pair[0] == "--profile-report")
+        .map(|pair| PathBuf::from(&pair[1]));
+    let profile_interval = args
+        .windows(2)
+        .find(|pair| pair[0] == "--profile-interval")
+        .and_then(|pair| pair[1].parse::<u32>().ok())
+        .unwrap_or(120);
+    let no_cache = args.iter().any(|arg| arg == "--no-cache");
+    info!(
+        profile,
+        ?profile_path,
+        profile_interval,
+        no_cache,
+        "sandbox profiling configuration"
+    );
 
     let max_frames: Option<u64> = args
         .windows(2)
@@ -201,6 +244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             renderer: None,
             static_camera,
             obj_path,
+            profile,
+            profile_path,
+            profile_interval,
+            no_cache,
         },
     )?;
     Ok(())

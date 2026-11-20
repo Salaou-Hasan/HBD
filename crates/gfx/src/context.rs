@@ -97,6 +97,9 @@ pub struct VulkanContext {
     current_frame: usize,
     width: u32,
     height: u32,
+    /// `0.0` means timestamp queries are unsupported; callers must check.
+    timestamp_period: f32,
+    timestamps_supported: bool,
 }
 
 impl VulkanContext {
@@ -230,6 +233,19 @@ impl VulkanContext {
                 "Vulkan device selected"
             );
 
+            let timestamp_period = properties.limits.timestamp_period;
+            let timestamp_valid_bits = instance
+                .get_physical_device_queue_family_properties(physical_device)
+                [graphics_queue_family as usize]
+                .timestamp_valid_bits;
+            let timestamps_supported = timestamp_valid_bits > 0 && timestamp_period > 0.0;
+            info!(
+                supported = timestamps_supported,
+                valid_bits = timestamp_valid_bits,
+                period_ns = timestamp_period,
+                "GPU timestamp capability"
+            );
+
             let mut unique_families = vec![graphics_queue_family];
             if present_queue_family != graphics_queue_family {
                 unique_families.push(present_queue_family);
@@ -334,6 +350,8 @@ impl VulkanContext {
                 current_frame: 0,
                 width,
                 height,
+                timestamp_period,
+                timestamps_supported,
             };
 
             context.create_swapchain()?;
@@ -630,6 +648,15 @@ impl VulkanContext {
 
     pub fn swapchain_format(&self) -> vk::Format {
         self.swapchain_format
+    }
+
+    /// Nanoseconds per timestamp tick. Callers must check `supports_timestamps`.
+    pub fn timestamp_period(&self) -> f32 {
+        self.timestamp_period
+    }
+
+    pub fn supports_timestamps(&self) -> bool {
+        self.timestamps_supported
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), GfxError> {
