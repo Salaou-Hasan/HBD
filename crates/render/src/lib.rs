@@ -107,7 +107,7 @@ impl Default for RendererConfig {
         Self {
             path: RenderPath::Hybrid,
             anti_aliasing: AntiAliasing::TemporalResolve,
-            hdr: false,
+            hdr: true,
             path_tracing: false,
             render_scale: 1.0,
             vram_budget_bytes: 8 * 1024 * 1024 * 1024,
@@ -124,7 +124,7 @@ mod tests {
         let config = RendererConfig::default();
         assert_eq!(config.path, RenderPath::Hybrid);
         assert_eq!(config.anti_aliasing, AntiAliasing::TemporalResolve);
-        assert!(!config.hdr, "HDR must be off by default");
+        assert!(config.hdr, "HDR must be on by default");
         assert!(!config.path_tracing, "path tracing must be off by default");
         assert_eq!(config.vram_budget_bytes, 8 * 1024 * 1024 * 1024);
     }
