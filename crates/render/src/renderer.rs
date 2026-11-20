@@ -19,7 +19,7 @@ use crate::tonemap::TonemapPass;
 use crate::{DebugView, RenderError};
 
 /// HBD Temporal Resolve (HBTR) is the default AA path. See `docs/ANTI-ALIASING.md`.
-const TAA_ENABLED: bool = true;
+const HBTR_ENABLED: bool = true;
 
 /// Timestamp marker indices. They must match the pass order in `PASS_NAMES`.
 const MARK_SHADOW: usize = 1;
@@ -88,7 +88,7 @@ impl Renderer {
         )?;
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
-        let presented_views = if TAA_ENABLED {
+        let presented_views = if HBTR_ENABLED {
             taa.resolved_views()
         } else {
             targets.hdr_views()
@@ -233,7 +233,7 @@ impl Renderer {
             extent,
         )?;
         let new_ssao = SsaoPass::new(context, new_targets.depth_views(), extent)?;
-        let presented_views = if TAA_ENABLED {
+        let presented_views = if HBTR_ENABLED {
             new_taa.resolved_views()
         } else {
             new_targets.hdr_views()
@@ -326,7 +326,7 @@ impl Renderer {
             active.resolve_slot(slot, frame_number);
         }
 
-        let jitter = if TAA_ENABLED {
+        let jitter = if HBTR_ENABLED {
             Vec2::new(
                 (halton(*frame_index + 1, 2) - 0.5) * 2.0 / extent.width as f32,
                 (halton(*frame_index + 1, 3) - 0.5) * 2.0 / extent.height as f32,
@@ -374,7 +374,7 @@ impl Renderer {
                         }
                         // Write only the acquired image's TAA uniform, and do it
                         // after its in-flight fence has been waited on.
-                        if TAA_ENABLED
+                        if HBTR_ENABLED
                             && let Err(error) =
                                 taa.begin_frame(image_index, jittered_view_projection)
                         {
@@ -413,7 +413,7 @@ impl Renderer {
                         active.mark(command_buffer, slot, MARK_GEOMETRY, frame_number);
                     }
 
-                    if TAA_ENABLED && !reuse {
+                    if HBTR_ENABLED && !reuse {
                         taa.record(command_buffer, image_index);
                         taa.end_frame_for_index(unjittered_view_projection, image_index);
                     }

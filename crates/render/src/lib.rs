@@ -2,8 +2,8 @@
 //!
 //! M1 owns a shadow → HDR geometry → tonemap pipeline with an instanced mesh
 //! pass, procedural sky, analytic IBL, cascaded shadows, SSAO, bloom, and AgX
-//! tonemapping. The TAA pass is implemented but bypassed at runtime; see
-//! `docs/RENDERER.md` and `docs/adr/0003-taa-disabled.md`.
+//! tonemapping. HBTR temporal resolve is the default anti-aliasing path; see
+//! `docs/ANTI-ALIASING.md` and `docs/adr/0005-hbtr.md`.
 //!
 //! Path tracing is research-only and disabled by default in `RendererConfig`.
 
@@ -83,10 +83,9 @@ pub enum RenderPath {
 pub enum AntiAliasing {
     Off,
     Msaa(u32),
-    /// Temporal AA. Implemented, but bypassed by the M1 runtime because it
-    /// produced artifacts; see `docs/adr/0003-taa-disabled.md`.
+    /// HBD Temporal Resolve (HBTR) temporal anti-aliasing path.
     #[default]
-    Taa,
+    TemporalResolve,
     /// Research track; enabled only when it wins the visual test suite.
     Custom,
 }
@@ -107,7 +106,7 @@ impl Default for RendererConfig {
     fn default() -> Self {
         Self {
             path: RenderPath::Hybrid,
-            anti_aliasing: AntiAliasing::Taa,
+            anti_aliasing: AntiAliasing::TemporalResolve,
             hdr: true,
             path_tracing: false,
             render_scale: 1.0,
@@ -124,7 +123,7 @@ mod tests {
     fn defaults_match_the_accepted_stack() {
         let config = RendererConfig::default();
         assert_eq!(config.path, RenderPath::Hybrid);
-        assert_eq!(config.anti_aliasing, AntiAliasing::Taa);
+        assert_eq!(config.anti_aliasing, AntiAliasing::TemporalResolve);
         assert!(config.hdr);
         assert!(!config.path_tracing, "path tracing must be off by default");
         assert_eq!(config.vram_budget_bytes, 8 * 1024 * 1024 * 1024);

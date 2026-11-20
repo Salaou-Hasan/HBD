@@ -1,4 +1,4 @@
-//! Temporal anti-aliasing.
+//! HBD Temporal Resolve (HBTR).
 //!
 //! Jitters the camera projection each frame, then resolves the current HDR
 //! sample against a reprojected history buffer with neighborhood clamping.
