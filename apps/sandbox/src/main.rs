@@ -25,6 +25,8 @@ struct Sandbox {
     profile_path: Option<PathBuf>,
     profile_interval: u32,
     no_cache: bool,
+    no_cull: bool,
+    cull_stats: bool,
     instances: Option<u32>,
     fps_smoothed: f32,
 }
@@ -82,6 +84,12 @@ impl PlatformHandler for Sandbox {
                     info!("E2E profiler not requested; no GPU timestamps recorded");
                 }
                 renderer.set_pass_cache_enabled(!self.no_cache);
+                if self.no_cull {
+                    renderer.set_culling_enabled(false);
+                    info!("GPU frustum culling disabled via --no-cull");
+                } else {
+                    info!("GPU frustum culling enabled (default)");
+                }
                 if let Some(count) = self.instances
                     && let Err(error) = renderer.set_instance_count(count)
                 {
@@ -219,6 +227,17 @@ impl PlatformHandler for Sandbox {
             if delta > 0.0 {
                 info!(frame = self.time.frame(), fps = 1.0 / delta, "frame");
             }
+            if self.cull_stats
+                && let Some(renderer) = self.renderer.as_ref()
+            {
+                match renderer.cull_counts() {
+                    Ok((visible, total)) => info!(
+                        frame = self.time.frame(),
+                        visible, total, "GPU cull stats (explicit readback)"
+                    ),
+                    Err(error) => error!(%error, "GPU cull stats readback failed"),
+                }
+            }
         }
     }
 }
@@ -274,6 +293,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|pair| pair[1].parse::<u32>().ok())
         .unwrap_or(120);
     let no_cache = args.iter().any(|arg| arg == "--no-cache");
+    let no_cull = args.iter().any(|arg| arg == "--no-cull");
+    let cull_stats = args.iter().any(|arg| arg == "--cull-stats");
     let instances = args
         .windows(2)
         .find(|pair| pair[0] == "--instances")
@@ -283,6 +304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ?profile_path,
         profile_interval,
         no_cache,
+        no_cull,
+        cull_stats,
         instances,
         "sandbox profiling configuration"
     );
@@ -323,6 +346,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile_path,
             profile_interval,
             no_cache,
+            no_cull,
+            cull_stats,
             instances,
             fps_smoothed: 0.0,
         },

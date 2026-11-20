@@ -20,6 +20,7 @@ use crate::{Camera, DirectionalLight, RenderError, shader};
 const MESH_WGSL: &str = include_str!("mesh.wgsl");
 const SKY_WGSL: &str = include_str!("sky.wgsl");
 const MESH_GENERATE_WGSL: &str = include_str!("mesh_generate.wgsl");
+const CULL_WGSL: &str = include_str!("cull.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const GRID_HALF_EXTENT: i32 = 4;
@@ -55,6 +56,14 @@ pub(crate) struct Instance {
     material: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CullUniform {
+    planes: [[f32; 4]; 6],
+    count: u32,
+    pad: [u32; 3],
+}
+
 pub(crate) struct MeshPass {
     device: ash::Device,
     pipeline: vk::Pipeline,
@@ -62,13 +71,30 @@ pub(crate) struct MeshPass {
     layout: vk::PipelineLayout,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
-    descriptor_set: vk::DescriptorSet,
+    /// Per-swapchain-image graphics sets: each binds that image's compacted
+    /// instance buffer. The extra set binds the source buffer for `--no-cull`.
+    graphics_sets: Vec<vk::DescriptorSet>,
+    graphics_set_no_cull: vk::DescriptorSet,
     vertex_buffer: GpuBuffer,
     index_buffer: GpuBuffer,
     // Kept alive for the lifetime of the descriptor set; not read after setup.
     _instance_buffer: GpuBuffer,
     /// GPU-readable draw parameters for `vkCmdDrawIndexedIndirect`.
-    indirect_buffer: GpuBuffer,
+    /// Per-image variants are written by the cull shader; the single no-cull
+    /// variant is written by the CPU.
+    indirect_buffer_no_cull: GpuBuffer,
+    indirect_buffers: Vec<GpuBuffer>,
+    visible_buffers: Vec<GpuBuffer>,
+    cull_pipeline: vk::Pipeline,
+    cull_layout: vk::PipelineLayout,
+    cull_set_layout: vk::DescriptorSetLayout,
+    cull_pool: vk::DescriptorPool,
+    cull_sets: Vec<vk::DescriptorSet>,
+    cull_uniform: GpuBuffer,
+    /// Host-visible copy of the GPU-written count for optional debug readback.
+    cull_readback: GpuBuffer,
+    cull_enabled: bool,
+    count_override: Option<u32>,
     uniform_buffer: GpuBuffer,
     index_count: u32,
     base_count: u32,
@@ -87,6 +113,7 @@ impl MeshPass {
         shadow_sampler: vk::Sampler,
         obj_path: Option<&Path>,
         instance_count: Option<u32>,
+        image_count: u32,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
         assert_eq!(shadow_views.len(), 3, "CSM requires three shadow views");
@@ -434,13 +461,44 @@ impl MeshPass {
             (buffer, None, count, source)
         };
         let draw = [index_count, base_count, 0u32, 0u32, 0u32];
-        let indirect_buffer = context.create_buffer(
+        // The no-cull draw args are CPU-written. Per-image args are written by
+        // the cull shader (atomic count) and reset with vkCmdFillBuffer.
+        let indirect_buffer_no_cull = context.create_buffer(
             size_of::<[u32; 5]>() as u64,
-            vk::BufferUsageFlags::INDIRECT_BUFFER,
+            vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
-            "HBD indirect draw",
+            "HBD indirect draw (no cull)",
         )?;
-        indirect_buffer.write(bytemuck::cast_slice(&draw))?;
+        indirect_buffer_no_cull.write(bytemuck::cast_slice(&draw))?;
+
+        let mut indirect_buffers = Vec::with_capacity(image_count as usize);
+        let mut visible_buffers = Vec::with_capacity(image_count as usize);
+        for _ in 0..image_count {
+            let indirect = context.create_buffer(
+                size_of::<[u32; 5]>() as u64,
+                vk::BufferUsageFlags::INDIRECT_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::CpuToGpu,
+                "HBD indirect draw (culled)",
+            )?;
+            indirect.write(bytemuck::cast_slice(&draw))?;
+            let visible = context.create_buffer(
+                u64::from(base_count) * size_of::<Instance>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::GpuOnly,
+                "HBD visible instances",
+            )?;
+            indirect_buffers.push(indirect);
+            visible_buffers.push(visible);
+        }
+        info!(
+            image_count,
+            bytes_per_image = base_count as u64 * size_of::<Instance>() as u64,
+            "per-image cull buffers allocated"
+        );
+
         let uniform_buffer = context.create_buffer(
             size_of::<FrameUniform>() as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
@@ -448,39 +506,187 @@ impl MeshPass {
             "HBD frame uniform",
         )?;
 
+        // --- GPU frustum culling resources ---------------------------------
+        let cull_spv = shader::compile_wgsl(CULL_WGSL, "cs_main", naga::ShaderStage::Compute)?;
+        let cull_module = create_shader_module(&device, &cull_spv)?;
+        let cull_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let cull_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&cull_bindings),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cull_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[cull_set_layout]),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cull_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(cull_module)
+            .name(c"cs_main");
+        let cull_info = vk::ComputePipelineCreateInfo::default()
+            .layout(cull_layout)
+            .stage(cull_stage);
+        let cull_pipeline = unsafe {
+            device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&cull_info),
+                None,
+            )
+        }
+        .map_err(|(_, error)| RenderError::Pipeline(error))?
+        .into_iter()
+        .next()
+        .ok_or(RenderError::MissingPipeline)?;
+        unsafe { device.destroy_shader_module(cull_module, None) };
+
+        let cull_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_count(image_count),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_BUFFER)
+                            .descriptor_count(image_count * 3),
+                    ])
+                    .max_sets(image_count),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cull_layouts_vec = vec![cull_set_layout; image_count as usize];
+        let cull_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(cull_pool)
+                    .set_layouts(&cull_layouts_vec),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cull_uniform = context.create_buffer(
+            size_of::<CullUniform>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            MemoryLocation::CpuToGpu,
+            "HBD cull uniform",
+        )?;
+        let cull_readback = context.create_buffer(
+            4,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::CpuToGpu,
+            "HBD cull readback",
+        )?;
+        let cull_uniform_info = [vk::DescriptorBufferInfo::default()
+            .buffer(cull_uniform.buffer())
+            .offset(0)
+            .range(cull_uniform.size())];
+        let source_info = [vk::DescriptorBufferInfo::default()
+            .buffer(instance_buffer.buffer())
+            .offset(0)
+            .range(instance_buffer.size())];
+        for (index, set) in cull_sets.iter().enumerate() {
+            let visible_info = [vk::DescriptorBufferInfo::default()
+                .buffer(visible_buffers[index].buffer())
+                .offset(0)
+                .range(visible_buffers[index].size())];
+            let indirect_info = [vk::DescriptorBufferInfo::default()
+                .buffer(indirect_buffers[index].buffer())
+                .offset(0)
+                .range(indirect_buffers[index].size())];
+            unsafe {
+                device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(&cull_uniform_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&source_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&visible_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(3)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&indirect_info),
+                    ],
+                    &[],
+                );
+            }
+        }
+        info!(
+            instances = base_count,
+            image_count, "GPU frustum culling ready"
+        );
+
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1),
+                .descriptor_count(image_count + 1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1),
+                .descriptor_count(image_count + 1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(3),
+                .descriptor_count(3 * (image_count + 1)),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1),
+                .descriptor_count(image_count + 1),
         ];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .pool_sizes(&pool_sizes)
-                    .max_sets(1),
+                    .max_sets(image_count + 1),
                 None,
             )
         }
         .map_err(GfxError::Vulkan)?;
-        let descriptor_set = unsafe {
+        let allocated_sets = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(descriptor_pool)
-                    .set_layouts(&set_layouts),
+                    .set_layouts(&vec![descriptor_set_layout; (image_count + 1) as usize]),
             )
         }
-        .map_err(GfxError::Vulkan)?[0];
+        .map_err(GfxError::Vulkan)?;
+        let graphics_sets: Vec<vk::DescriptorSet> = allocated_sets[..image_count as usize].to_vec();
+        let graphics_set_no_cull = allocated_sets[image_count as usize];
 
-        let instance_info = [vk::DescriptorBufferInfo::default()
+        let source_info = [vk::DescriptorBufferInfo::default()
             .buffer(instance_buffer.buffer())
             .offset(0)
             .range(instance_buffer.size())];
@@ -498,41 +704,79 @@ impl MeshPass {
             .buffer(uniform_buffer.buffer())
             .offset(0)
             .range(uniform_buffer.size())];
-        let descriptor_writes = [
+
+        for (index, set) in graphics_sets.iter().enumerate() {
+            let instance_info = [vk::DescriptorBufferInfo::default()
+                .buffer(visible_buffers[index].buffer())
+                .offset(0)
+                .range(visible_buffers[index].size())];
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&uniform_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&instance_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[0..1]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(3)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[1..2]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(4)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[2..3]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&shadow_sampler_info),
+            ];
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
+        let no_cull_writes = [
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(&uniform_info),
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&instance_info),
+                .buffer_info(&source_info),
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&shadow_image_infos[0..1]),
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&shadow_image_infos[1..2]),
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(4)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&shadow_image_infos[2..3]),
             vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
+                .dst_set(graphics_set_no_cull)
                 .dst_binding(5)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .image_info(&shadow_sampler_info),
         ];
-        unsafe {
-            device.update_descriptor_sets(&descriptor_writes, &[]);
-        }
+        unsafe { device.update_descriptor_sets(&no_cull_writes, &[]) };
 
         info!(
             instances = base_count,
@@ -548,11 +792,23 @@ impl MeshPass {
             layout: pipeline_layout,
             descriptor_set_layout,
             descriptor_pool,
-            descriptor_set,
+            graphics_sets,
+            graphics_set_no_cull,
             vertex_buffer,
             index_buffer,
             _instance_buffer: instance_buffer,
-            indirect_buffer,
+            indirect_buffer_no_cull,
+            indirect_buffers,
+            visible_buffers,
+            cull_pipeline,
+            cull_layout,
+            cull_set_layout,
+            cull_pool,
+            cull_sets,
+            cull_uniform,
+            cull_readback,
+            cull_enabled: true,
+            count_override: None,
             uniform_buffer,
             index_count,
             base_count,
@@ -588,24 +844,172 @@ impl MeshPass {
             shadow_splits: [12.0, 32.0, 80.0, self.base_count as f32],
         };
 
+        // Frustum planes for the cull pass. Use the unjittered pose so subpixel
+        // jitter does not churn the visible set. Vulkan clip depth is 0..1.
+        let unjittered = camera.view_projection(aspect);
+        let c0 = unjittered.col(0);
+        let c1 = unjittered.col(1);
+        let c2 = unjittered.col(2);
+        let c3 = unjittered.col(3);
+        let raw_planes = [c3 + c0, c3 - c0, c3 + c1, c3 - c1, c2, c3 - c2];
+        let planes = raw_planes.map(|plane| {
+            let length = plane.truncate().length().max(1.0e-8);
+            [
+                plane.x / length,
+                plane.y / length,
+                plane.z / length,
+                plane.w / length,
+            ]
+        });
+        let cull_uniform = CullUniform {
+            planes,
+            count: self.base_count,
+            pad: [0; 3],
+        };
+        self.cull_uniform
+            .write(bytemuck::bytes_of(&cull_uniform))
+            .map_err(RenderError::Gfx)?;
+
         self.uniform_buffer
             .write(bytemuck::bytes_of(&uniform))
             .map_err(RenderError::Gfx)
     }
 
-    /// Override the indirect instance count. Values above the source instance
-    /// count repeat that source set; this is a GPU-throughput stress mode, not
-    /// a scene of unique objects. Always called explicitly and logged by the
-    /// renderer.
-    pub(crate) fn set_instance_count(&self, count: u32) -> Result<(), RenderError> {
+    /// Override the instance count for the explicit no-cull stress path.
+    pub(crate) fn set_instance_count(&mut self, count: u32) -> Result<(), RenderError> {
+        self.count_override = Some(count);
         let draw = [self.index_count, count, 0u32, 0u32, 0u32];
-        self.indirect_buffer
+        self.indirect_buffer_no_cull
             .write(bytemuck::cast_slice(&draw))
             .map_err(RenderError::Gfx)
     }
 
-    pub(crate) fn record(&self, command_buffer: vk::CommandBuffer, extent: vk::Extent2D) {
-        let descriptor_set = self.descriptor_set;
+    /// Explicit A/B switch for GPU frustum culling. Always logged by renderer.
+    pub(crate) fn set_culling_enabled(&mut self, enabled: bool) {
+        self.cull_enabled = enabled;
+    }
+
+    pub(crate) fn total_count(&self) -> u32 {
+        self.base_count
+    }
+
+    /// Dispatches culling for one swapchain image. Both the compacted instance
+    /// buffer and the indirect draw args are per-image, so no other in-flight
+    /// frame can read them while this one writes.
+    pub(crate) fn dispatch_cull(&self, command_buffer: vk::CommandBuffer, image_index: u32) {
+        if !self.cull_enabled {
+            return;
+        }
+        let index = image_index as usize;
+        let device = &self.device;
+        unsafe {
+            // Reset the atomic instanceCount as a transfer op, then make it
+            // visible to the compute shader before it atomically increments.
+            device.cmd_fill_buffer(
+                command_buffer,
+                self.indirect_buffers[index].buffer(),
+                4,
+                4,
+                0,
+            );
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                    .buffer(self.indirect_buffers[index].buffer())
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)],
+                &[],
+            );
+
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cull_pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cull_layout,
+                0,
+                std::slice::from_ref(&self.cull_sets[index]),
+                &[],
+            );
+            device.cmd_dispatch(command_buffer, self.base_count.div_ceil(256), 1, 1);
+
+            let barriers = [
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(self.visible_buffers[index].buffer())
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+                vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::INDIRECT_COMMAND_READ)
+                    .buffer(self.indirect_buffers[index].buffer())
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE),
+            ];
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &barriers,
+                &[],
+            );
+        }
+    }
+
+    /// Explicit, stalled debug readback of the last culled count for an image.
+    pub(crate) fn read_visible_count(
+        &self,
+        context: &VulkanContext,
+        image_index: u32,
+    ) -> Result<u32, RenderError> {
+        context
+            .one_time_commands(|device, command_buffer| unsafe {
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    self.indirect_buffers[image_index as usize].buffer(),
+                    self.cull_readback.buffer(),
+                    &[vk::BufferCopy::default()
+                        .src_offset(4)
+                        .dst_offset(0)
+                        .size(4)],
+                );
+            })
+            .map_err(RenderError::Gfx)?;
+        let mut bytes = [0u8; 4];
+        self.cull_readback
+            .read(&mut bytes)
+            .map_err(RenderError::Gfx)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    pub(crate) fn record(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        extent: vk::Extent2D,
+        image_index: u32,
+    ) {
+        // Culling on: this image's compacted buffer. Off: the source buffer and
+        // its own CPU-written draw args. They are never mixed.
+        let (descriptor_set, indirect_buffer) = if self.cull_enabled {
+            (
+                self.graphics_sets[image_index as usize],
+                &self.indirect_buffers[image_index as usize],
+            )
+        } else {
+            (self.graphics_set_no_cull, &self.indirect_buffer_no_cull)
+        };
         unsafe {
             let viewport = vk::Viewport::default()
                 .x(0.0)
@@ -667,7 +1071,7 @@ impl MeshPass {
             // CPU round trip. No visual change from the previous direct draw.
             self.device.cmd_draw_indexed_indirect(
                 command_buffer,
-                self.indirect_buffer.buffer(),
+                indirect_buffer.buffer(),
                 0,
                 1,
                 0,
@@ -698,6 +1102,11 @@ impl Drop for MeshPass {
             if let Some(layout) = self.generate_set_layout {
                 self.device.destroy_descriptor_set_layout(layout, None);
             }
+            self.device.destroy_pipeline(self.cull_pipeline, None);
+            self.device.destroy_pipeline_layout(self.cull_layout, None);
+            self.device.destroy_descriptor_pool(self.cull_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.cull_set_layout, None);
         }
     }
 }

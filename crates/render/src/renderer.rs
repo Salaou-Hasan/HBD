@@ -62,6 +62,8 @@ pub struct Renderer {
     light: DirectionalLight,
     /// Active presentation path, driven by `RendererConfig::hdr`.
     hdr_enabled: bool,
+    /// Last presented image; used only by the explicit cull-stats readback.
+    last_image_index: u32,
 }
 
 impl Renderer {
@@ -119,6 +121,7 @@ impl Renderer {
             shadow.sampler(),
             obj_path.as_deref(),
             instance_count,
+            image_count as u32,
         )?;
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
@@ -172,7 +175,25 @@ impl Renderer {
             instance_count,
             light,
             hdr_enabled,
+            last_image_index: 0,
         })
+    }
+
+    /// Explicit A/B switch for GPU frustum culling. Toggling invalidates the
+    /// pass cache so the next frame re-culls with the new setting.
+    pub fn set_culling_enabled(&mut self, enabled: bool) {
+        self.mesh.set_culling_enabled(enabled);
+        self.last_view_projection = None;
+        self.pass_valid.fill(false);
+        info!(enabled, "GPU frustum culling explicitly toggled");
+    }
+
+    /// Explicit, stalled readback of the last culled instance count.
+    pub fn cull_counts(&self) -> Result<(u32, u32), RenderError> {
+        let visible = self
+            .mesh
+            .read_visible_count(&self.context, self.last_image_index)?;
+        Ok((visible, self.mesh.total_count()))
     }
 
     /// Explicit presentation-path switch. Mirrors `RendererConfig::hdr`.
@@ -274,6 +295,7 @@ impl Renderer {
             instance_count,
             light,
             hdr_enabled,
+            last_image_index: _,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
@@ -288,6 +310,7 @@ impl Renderer {
             new_shadow.sampler(),
             obj_path.as_deref(),
             *instance_count,
+            image_count as u32,
         )?;
         let new_taa = TaaPass::new(
             context,
@@ -355,6 +378,7 @@ impl Renderer {
             instance_count: _,
             light,
             hdr_enabled: _,
+            last_image_index,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;
@@ -421,6 +445,7 @@ impl Renderer {
             .render(
                 clear_color,
                 |device, command_buffer, image_index, extent| {
+                    *last_image_index = image_index;
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.begin_frame(command_buffer, slot, frame_number);
                     }
@@ -449,6 +474,9 @@ impl Renderer {
                             taa_error = Some(error);
                             return;
                         }
+                        // Per-image cull: compacted instances and the indirect
+                        // count are private to this swapchain image.
+                        mesh.dispatch_cull(command_buffer, image_index);
                         shadow.record(command_buffer);
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {
@@ -472,7 +500,7 @@ impl Renderer {
                                 vk::SubpassContents::INLINE,
                             );
                         }
-                        mesh.record(command_buffer, extent);
+                        mesh.record(command_buffer, extent, image_index);
                         unsafe {
                             device.cmd_end_render_pass(command_buffer);
                         }
