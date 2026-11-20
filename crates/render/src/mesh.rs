@@ -7,6 +7,7 @@
 
 use std::ffi::CStr;
 use std::mem::{offset_of, size_of};
+use std::path::Path;
 
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
@@ -76,6 +77,7 @@ impl MeshPass {
         render_pass: vk::RenderPass,
         shadow_views: &[vk::ImageView],
         shadow_sampler: vk::Sampler,
+        obj_path: Option<&Path>,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
         assert_eq!(shadow_views.len(), 3, "CSM requires three shadow views");
@@ -270,17 +272,25 @@ impl MeshPass {
             device.destroy_shader_module(sky_fragment_module, None);
         }
 
-        let (vertices, indices) = cube_mesh();
-        let instances = build_scene();
+        let (vertices, indices, instances, source) = match obj_path {
+            Some(path) => {
+                let (vertices, indices, instance) = load_obj(path)?;
+                (vertices, indices, vec![instance], "obj")
+            }
+            None => {
+                let (vertices, indices) = cube_mesh();
+                (vertices, indices, build_scene(), "cube grid")
+            }
+        };
         let vertex_buffer = context.upload_buffer(
             vk::BufferUsageFlags::VERTEX_BUFFER,
             bytemuck::cast_slice(&vertices),
-            "HBD cube vertex buffer",
+            "HBD vertex buffer",
         )?;
         let index_buffer = context.upload_buffer(
             vk::BufferUsageFlags::INDEX_BUFFER,
             bytemuck::cast_slice(&indices),
-            "HBD cube index buffer",
+            "HBD index buffer",
         )?;
         let instance_buffer = context.upload_buffer(
             vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -383,7 +393,8 @@ impl MeshPass {
         info!(
             instances = instances.len(),
             triangles = indices.len() / 3,
-            "instanced cube pipeline ready"
+            source,
+            "mesh pipeline ready"
         );
 
         Ok(Self {
@@ -653,4 +664,156 @@ pub(crate) fn build_scene() -> Vec<Instance> {
     }
 
     instances
+}
+
+/// Temporary early-visualization loader for `--obj`.
+///
+/// This is deliberately not the asset pipeline: it reads only positions and
+/// faces, derives smooth normals from the triangles, ignores materials,
+/// textures and vertex normals, and normalizes the whole mesh into the M1 test
+/// scene as a single instance. See `docs/EARLY-OBJ-TEST.md`.
+pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance), RenderError> {
+    let location = path.display().to_string();
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| RenderError::Obj(format!("{location}: {error}")))?;
+
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut faces: Vec<[u32; 3]> = Vec::new();
+
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = || format!("{location} line {}", line_number + 1);
+        let mut parts = line.split_whitespace();
+        match parts.next() {
+            Some("v") => {
+                let mut position = [0.0f32; 3];
+                for component in &mut position {
+                    let token = parts
+                        .next()
+                        .ok_or_else(|| RenderError::Obj(format!("{}: incomplete vertex", at())))?;
+                    *component = token.parse::<f32>().map_err(|error| {
+                        RenderError::Obj(format!(
+                            "{}: bad vertex component '{token}': {error}",
+                            at()
+                        ))
+                    })?;
+                }
+                positions.push(Vec3::from_array(position));
+            }
+            Some("f") => {
+                let mut corners = Vec::new();
+                for token in parts {
+                    let raw = token.split('/').next().unwrap_or(token);
+                    let index: i64 = raw.parse().map_err(|error| {
+                        RenderError::Obj(format!("{}: bad face index '{token}': {error}", at()))
+                    })?;
+                    let resolved = if index < 0 {
+                        positions.len() as i64 + index
+                    } else {
+                        index - 1
+                    };
+                    if resolved < 0 || resolved as usize >= positions.len() {
+                        return Err(RenderError::Obj(format!(
+                            "{}: face index out of range",
+                            at()
+                        )));
+                    }
+                    corners.push(resolved as u32);
+                }
+                for i in 1..corners.len().saturating_sub(1) {
+                    faces.push([corners[0], corners[i], corners[i + 1]]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if positions.is_empty() || faces.is_empty() {
+        return Err(RenderError::Obj(format!(
+            "{location}: no vertices or faces found"
+        )));
+    }
+
+    let mut normals = vec![Vec3::ZERO; positions.len()];
+    for face in &faces {
+        let a = positions[face[0] as usize];
+        let b = positions[face[1] as usize];
+        let c = positions[face[2] as usize];
+        let normal = (b - a).cross(c - a);
+        for index in face {
+            normals[*index as usize] += normal;
+        }
+    }
+    for normal in &mut normals {
+        if normal.length_squared() > f32::EPSILON {
+            *normal = normal.normalize();
+        } else {
+            *normal = Vec3::Y;
+        }
+    }
+
+    let vertices: Vec<Vertex> = positions
+        .iter()
+        .zip(normals.iter())
+        .map(|(position, normal)| Vertex {
+            position: position.to_array(),
+            normal: normal.to_array(),
+        })
+        .collect();
+    let indices: Vec<u32> = faces.into_iter().flatten().collect();
+
+    let minimum = positions
+        .iter()
+        .fold(Vec3::splat(f32::INFINITY), |acc, p| acc.min(*p));
+    let maximum = positions
+        .iter()
+        .fold(Vec3::splat(f32::NEG_INFINITY), |acc, p| acc.max(*p));
+    let center = (minimum + maximum) * 0.5;
+    let extent = maximum - minimum;
+    let largest = extent.x.max(extent.y).max(extent.z);
+    if !largest.is_finite() || largest <= 0.0 {
+        return Err(RenderError::Obj(format!("{location}: degenerate bounds")));
+    }
+    let scale = 5.0 / largest;
+    let model = Mat4::from_translation(Vec3::new(0.0, 1.6, 0.0))
+        * Mat4::from_rotation_y(std::f32::consts::PI)
+        * Mat4::from_scale(Vec3::splat(scale))
+        * Mat4::from_translation(-center);
+    let instance = Instance {
+        model: model.to_cols_array_2d(),
+        base_color: [0.06, 0.16, 0.5, 1.0],
+        material: [0.18, 0.36, 1.0, 0.0],
+    };
+
+    Ok((vertices, indices, instance))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_obj_triangulates_and_normalizes() {
+        let path = std::env::temp_dir().join("hbd-obj-loader-test.obj");
+        std::fs::write(
+            &path,
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 4 2\nf 2 4 3\nf 3 4 1\n",
+        )
+        .unwrap();
+
+        let (vertices, indices, instance) = load_obj(&path).unwrap();
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices.len(), 12);
+        assert!(
+            instance
+                .model
+                .iter()
+                .all(|row| row.iter().all(|value| value.is_finite()))
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
 }

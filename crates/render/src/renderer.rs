@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use ash::vk;
 use hbd_core::math::Vec2;
 use hbd_gfx::VulkanContext;
@@ -34,10 +36,25 @@ pub struct Renderer {
     targets: RenderTargets,
     context: VulkanContext,
     frame_index: u64,
+    /// Temporary early-visualization override; not part of the asset pipeline.
+    obj_path: Option<PathBuf>,
 }
 
 impl Renderer {
     pub fn new(context: VulkanContext) -> Result<Self, RenderError> {
+        Self::create(context, None)
+    }
+
+    /// Early-validation hook: render a single OBJ instead of the cube grid.
+    /// See `docs/EARLY-OBJ-TEST.md`. This is not the asset pipeline.
+    pub fn new_with_obj(
+        context: VulkanContext,
+        obj_path: impl AsRef<Path>,
+    ) -> Result<Self, RenderError> {
+        Self::create(context, Some(obj_path.as_ref().to_path_buf()))
+    }
+
+    fn create(context: VulkanContext, obj_path: Option<PathBuf>) -> Result<Self, RenderError> {
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
         let light = DirectionalLight::default();
@@ -49,6 +66,7 @@ impl Renderer {
             targets.render_pass(),
             shadow.views(),
             shadow.sampler(),
+            obj_path.as_deref(),
         )?;
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
@@ -86,6 +104,7 @@ impl Renderer {
             targets,
             context,
             frame_index: 0,
+            obj_path,
         })
     }
 
@@ -102,6 +121,7 @@ impl Renderer {
             targets,
             context,
             frame_index: _,
+            obj_path,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
@@ -114,6 +134,7 @@ impl Renderer {
             new_targets.render_pass(),
             new_shadow.views(),
             new_shadow.sampler(),
+            obj_path.as_deref(),
         )?;
         let new_taa = TaaPass::new(
             context,
@@ -163,6 +184,7 @@ impl Renderer {
             targets,
             context,
             frame_index,
+            obj_path: _,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;

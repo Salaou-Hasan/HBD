@@ -46,6 +46,11 @@ Sandbox options:
 cargo run -p hbd-sandbox -- --probe            # print Vulkan devices, no window
 cargo run -p hbd-sandbox -- --static-camera    # freeze the camera for comparisons
 cargo run -p hbd-sandbox -- --frames 300       # render N frames, then exit
+
+Early (temporary) real-mesh test, documented in [EARLY-OBJ-TEST.md](docs/EARLY-OBJ-TEST.md):
+
+```powershell
+cargo run -p hbd-sandbox -- --obj "$env:TEMP\opencode\stanford-bunny.obj" --static-camera
 ```
 
 In the sandbox window, press `0`–`7` for final / filmic / HDR / bloom / AO / depth / shadow cascade / TAA history.
@@ -79,6 +84,7 @@ Downstream code should depend on `hbd-engine` only. Internal `hbd-*` crates may 
 - [RENDERER.md](docs/RENDERER.md) — M1 pipeline, targets, debug views, TAA status, known gaps.
 - [ROADMAP.md](docs/ROADMAP.md) — milestones, deliverables, exit criteria.
 - [BUILDING.md](docs/BUILDING.md) — setup, commands, sandbox flags, troubleshooting.
+- [EARLY-OBJ-TEST.md](docs/EARLY-OBJ-TEST.md) — temporary `--obj` hook for seeing a real mesh in the renderer (not the asset pipeline).
 - [CONTRIBUTING.md](docs/CONTRIBUTING.md) — conventions and quality gate.
 - [visual-target.md](docs/visual-target.md) — the visual quality bar and M1 acceptance tests.
 - [ADR 0001 — stack](docs/adr/0001-stack.md), [0002 — editor boundary](docs/adr/0002-editor-boundary.md), [0003 — TAA disabled](docs/adr/0003-taa-disabled.md).

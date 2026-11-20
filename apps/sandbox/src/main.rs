@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hbd_engine::core::Time;
@@ -15,6 +16,7 @@ struct Sandbox {
     time: Time,
     renderer: Option<Renderer>,
     static_camera: bool,
+    obj_path: Option<PathBuf>,
 }
 
 impl PlatformHandler for Sandbox {
@@ -34,7 +36,11 @@ impl PlatformHandler for Sandbox {
             }
         };
 
-        match Renderer::new(context) {
+        let renderer = match self.obj_path.as_deref() {
+            Some(path) => Renderer::new_with_obj(context, path),
+            None => Renderer::new(context),
+        };
+        match renderer {
             Ok(renderer) => {
                 info!(
                     extent = ?renderer.swapchain_extent(),
@@ -172,6 +178,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let static_camera = args.iter().any(|arg| arg == "--static-camera");
+    let obj_path = args
+        .windows(2)
+        .find(|pair| pair[0] == "--obj")
+        .map(|pair| PathBuf::from(&pair[1]));
 
     let max_frames: Option<u64> = args
         .windows(2)
@@ -190,6 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             time: Time::new(),
             renderer: None,
             static_camera,
+            obj_path,
         },
     )?;
     Ok(())

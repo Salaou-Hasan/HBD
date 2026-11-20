@@ -56,6 +56,9 @@ pub enum RenderError {
     #[error(transparent)]
     Shader(#[from] ShaderError),
 
+    #[error("OBJ load failed: {0}")]
+    Obj(String),
+
     #[error("failed to create the graphics pipeline: {0:?}")]
     Pipeline(vk::Result),
 

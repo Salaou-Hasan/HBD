@@ -36,6 +36,7 @@ cargo build -p hbd-sandbox
 |---|---|
 | `--probe` | Print Vulkan loader/device information and exit without a window. |
 | `--static-camera` | Freeze the camera at angle 0, useful for image comparisons. |
+| `--obj <path>` | **Temporary early test**: replace the cube grid with one OBJ mesh. Not the asset pipeline; see [EARLY-OBJ-TEST.md](EARLY-OBJ-TEST.md). |
 | `--frames N` | Exit after N redraw frames. Useful for automated smoke tests. |
 
 Examples:
