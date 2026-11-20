@@ -22,7 +22,7 @@ HBTR is implemented in `crates/render/src/taa_resolve.wgsl`. It is not a copy of
 4. **Luminance-adaptive accumulation.** Current and history weights are divided by `1 + luma`, suppressing fireflies from bright HDR samples (Karis-style, applied to our blend).
 5. **Out-of-screen / behind-camera rejection** before any history reuse, with the first frame of a history slot using blend 0.
 
-History is per swapchain image, with its own previous view-projection pose and ping-pong slot (see `crates/render/src/taa.rs`). This is what fixed the earlier reprojection error: with three swapchain images an image's history is three frames old, not one.
+History is per swapchain image, with its own previous view-projection pose and ping-pong slot (see `crates/render/src/hbtr.rs`). This is what fixed the earlier reprojection error: with three swapchain images an image's history is three frames old, not one.
 
 ## Cost and quality (Intel UHD, 1280×720, 900 frames)
 
@@ -42,4 +42,4 @@ The AA pass costs ~0.9 ms on the integrated GPU; on the RTX 3060 target this is 
 
 ## Enabling/disabling
 
-`TAA_ENABLED` in `crates/render/src/renderer.rs` is the explicit switch (currently `true`). The older disable decision is recorded in [ADR 0003](adr/0003-taa-disabled.md) and superseded by [ADR 0005](adr/0005-hbtr.md).
+`HBTR_ENABLED` in `crates/render/src/renderer.rs` is the explicit switch (currently `true`). The older disable decision is recorded in [ADR 0003](adr/0003-taa-disabled.md) and superseded by [ADR 0005](adr/0005-hbtr.md).

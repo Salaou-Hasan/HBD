@@ -9,12 +9,12 @@ use tracing::info;
 
 use crate::bloom::BloomPass;
 use crate::camera::{Camera, DirectionalLight};
+use crate::hbtr::TaaPass;
 use crate::mesh::MeshPass;
 use crate::profiler::Profiler;
 use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
 use crate::ssao::SsaoPass;
-use crate::taa::TaaPass;
 use crate::tonemap::TonemapPass;
 use crate::{DebugView, RenderError};
 

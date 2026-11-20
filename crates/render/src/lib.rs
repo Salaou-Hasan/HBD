@@ -13,6 +13,7 @@ use thiserror::Error;
 
 mod bloom;
 mod camera;
+mod hbtr;
 mod mesh;
 mod profiler;
 mod render_targets;
@@ -20,7 +21,6 @@ mod renderer;
 pub mod shader;
 mod shadow;
 mod ssao;
-mod taa;
 mod tonemap;
 
 pub use camera::{Camera, DirectionalLight};
