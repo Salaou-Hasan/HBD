@@ -4,11 +4,11 @@
 @group(0) @binding(3) var ao_texture: texture_2d<f32>;
 
 struct DebugParams {
-    // 0: AgX final, 1: filmic, 2: HDR, 3: bloom, 4: AO,
-    // 5: depth, 6: shadow cascade, 7: TAA history
+    // 0: final (AgX when hdr_enabled, else clamped LDR), 1: filmic, 2: HDR,
+    // 3: bloom, 4: AO, 5: depth, 6: shadow cascade, 7: TAA history
     mode: u32,
     fps_bits: u32,
-    pad0: u32,
+    hdr_enabled: u32,
     pad1: u32,
 };
 @group(0) @binding(4) var<uniform> debug_params: DebugParams;
@@ -100,7 +100,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var color = vec3<f32>(0.0);
 
     switch debug_params.mode {
-        case 0u: { color = agx(lit); }
+        // With HDR off (the default config), present the scene-referred light
+        // directly: clamp to display range and let the sRGB swapchain encode.
+        // AgX remains available with HDR on, or via its own debug path.
+        case 0u: {
+            color = select(
+                clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)),
+                agx(lit),
+                debug_params.hdr_enabled != 0u,
+            );
+        }
         case 1u: { color = filmic(lit); }
         case 2u: { color = hdr / (hdr + vec3<f32>(1.0)); }
         case 3u: { color = bloom; }

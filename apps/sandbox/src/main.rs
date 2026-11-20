@@ -7,7 +7,7 @@ use hbd_engine::ecs::EcsScene;
 use hbd_engine::gfx;
 use hbd_engine::gfx::VulkanContext;
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
-use hbd_engine::render::{Camera, DebugView, Renderer};
+use hbd_engine::render::{Camera, DebugView, Renderer, RendererConfig};
 use hbd_engine::scene::{Camera as EcsCamera, Entity, Light as EcsLight};
 use tracing::{error, info, warn};
 use winit::event::{ElementState, WindowEvent};
@@ -60,7 +60,8 @@ impl PlatformHandler for Sandbox {
         } else if let Some(count) = self.instances {
             Renderer::new_with_instance_count(context, count)
         } else {
-            Renderer::new(context)
+            // Consume the public config: hdr=false presents saturated LDR color.
+            Renderer::new_with_config(context, RendererConfig::default())
         };
         match renderer {
             Ok(mut renderer) => {

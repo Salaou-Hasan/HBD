@@ -16,7 +16,7 @@ use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
 use crate::ssao::SsaoPass;
 use crate::tonemap::TonemapPass;
-use crate::{DebugView, RenderError};
+use crate::{DebugView, RenderError, RendererConfig};
 
 /// HBD Temporal Resolve (HBTR) is the default AA path. See `docs/ANTI-ALIASING.md`.
 const HBTR_ENABLED: bool = true;
@@ -60,11 +60,13 @@ pub struct Renderer {
     /// Directional light used by geometry and shadows. Set explicitly by the
     /// engine's ECS scene bridge; defaults to the M1 light.
     light: DirectionalLight,
+    /// Active presentation path, driven by `RendererConfig::hdr`.
+    hdr_enabled: bool,
 }
 
 impl Renderer {
     pub fn new(context: VulkanContext) -> Result<Self, RenderError> {
-        Self::create(context, None, None)
+        Self::create(context, None, None, RendererConfig::default().hdr)
     }
 
     /// Early-validation hook: render a single OBJ instead of the cube grid.
@@ -73,7 +75,12 @@ impl Renderer {
         context: VulkanContext,
         obj_path: impl AsRef<Path>,
     ) -> Result<Self, RenderError> {
-        Self::create(context, Some(obj_path.as_ref().to_path_buf()), None)
+        Self::create(
+            context,
+            Some(obj_path.as_ref().to_path_buf()),
+            None,
+            RendererConfig::default().hdr,
+        )
     }
 
     /// GPU-throughput stress mode: generate `count` cubes on the GPU.
@@ -81,13 +88,23 @@ impl Renderer {
         context: VulkanContext,
         count: u32,
     ) -> Result<Self, RenderError> {
-        Self::create(context, None, Some(count))
+        Self::create(context, None, Some(count), RendererConfig::default().hdr)
+    }
+
+    /// Constructs the renderer from the public config. `hdr: false` presents
+    /// clamped scene-referred color directly, keeping saturated palette colors.
+    pub fn new_with_config(
+        context: VulkanContext,
+        config: RendererConfig,
+    ) -> Result<Self, RenderError> {
+        Self::create(context, None, None, config.hdr)
     }
 
     fn create(
         context: VulkanContext,
         obj_path: Option<PathBuf>,
         instance_count: Option<u32>,
+        hdr_enabled: bool,
     ) -> Result<Self, RenderError> {
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
@@ -120,6 +137,12 @@ impl Renderer {
             shadow.views(),
             taa.history_views(),
         )?;
+        let mut tonemap = tonemap;
+        tonemap.set_hdr_enabled(hdr_enabled)?;
+        info!(
+            hdr = hdr_enabled,
+            "presentation path selected (clamped LDR when off, AgX when on)"
+        );
 
         info!(
             format = ?targets.hdr_format(),
@@ -148,7 +171,16 @@ impl Renderer {
             obj_path,
             instance_count,
             light,
+            hdr_enabled,
         })
+    }
+
+    /// Explicit presentation-path switch. Mirrors `RendererConfig::hdr`.
+    pub fn set_hdr_enabled(&mut self, enabled: bool) -> Result<(), RenderError> {
+        self.tonemap.set_hdr_enabled(enabled)?;
+        self.hdr_enabled = enabled;
+        info!(hdr = enabled, "presentation path explicitly changed");
+        Ok(())
     }
 
     /// Explicit directional-light override, used by the ECS scene bridge.
@@ -241,6 +273,7 @@ impl Renderer {
             obj_path,
             instance_count,
             light,
+            hdr_enabled,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
@@ -278,6 +311,8 @@ impl Renderer {
             new_shadow.views(),
             new_taa.history_views(),
         )?;
+        let mut new_tonemap = new_tonemap;
+        new_tonemap.set_hdr_enabled(*hdr_enabled)?;
 
         // Drop descriptor consumers before the resources they reference.
         *tonemap = new_tonemap;
@@ -319,6 +354,7 @@ impl Renderer {
             obj_path: _,
             instance_count: _,
             light,
+            hdr_enabled: _,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;

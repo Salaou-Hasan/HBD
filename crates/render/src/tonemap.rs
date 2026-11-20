@@ -20,7 +20,8 @@ const FRAGMENT_ENTRY: &CStr = c"fs_main";
 struct DebugParams {
     mode: u32,
     fps_bits: u32,
-    pad: [u32; 2],
+    hdr_enabled: u32,
+    pad: [u32; 1],
 }
 
 pub(crate) struct TonemapPass {
@@ -33,6 +34,7 @@ pub(crate) struct TonemapPass {
     descriptor_sets: Vec<vk::DescriptorSet>,
     debug_buffer: GpuBuffer,
     mode: u32,
+    hdr_enabled: bool,
 }
 
 impl TonemapPass {
@@ -197,7 +199,8 @@ impl TonemapPass {
             .write(bytemuck::bytes_of(&DebugParams {
                 mode: 0,
                 fps_bits: 0,
-                pad: [0, 0],
+                hdr_enabled: 0,
+                pad: [0],
             }))
             .map_err(RenderError::Gfx)?;
 
@@ -332,6 +335,7 @@ impl TonemapPass {
             descriptor_sets,
             debug_buffer,
             mode: 0,
+            hdr_enabled: false,
         })
     }
 
@@ -341,7 +345,23 @@ impl TonemapPass {
             .write(bytemuck::bytes_of(&DebugParams {
                 mode,
                 fps_bits: 0,
-                pad: [0, 0],
+                hdr_enabled: u32::from(self.hdr_enabled),
+                pad: [0],
+            }))
+            .map_err(RenderError::Gfx)
+    }
+
+    /// Explicit HDR switch: when false, the final view clamps scene-referred
+    /// light to the display range instead of running AgX. Always logged by
+    /// the renderer so the active path is visible.
+    pub(crate) fn set_hdr_enabled(&mut self, enabled: bool) -> Result<(), RenderError> {
+        self.hdr_enabled = enabled;
+        self.debug_buffer
+            .write(bytemuck::bytes_of(&DebugParams {
+                mode: self.mode,
+                fps_bits: 0,
+                hdr_enabled: u32::from(enabled),
+                pad: [0],
             }))
             .map_err(RenderError::Gfx)
     }
@@ -350,7 +370,8 @@ impl TonemapPass {
         let _ = self.debug_buffer.write(bytemuck::bytes_of(&DebugParams {
             mode: self.mode,
             fps_bits: fps.to_bits(),
-            pad: [0, 0],
+            hdr_enabled: u32::from(self.hdr_enabled),
+            pad: [0],
         }));
     }
 
