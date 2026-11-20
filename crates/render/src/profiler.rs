@@ -20,7 +20,7 @@ pub(crate) const PASS_NAMES: [&str; 8] = [
     "shadow", "geometry", "taa", "ssao", "bloom", "tonemap", "other", "frame",
 ];
 const MARKERS: usize = PASS_NAMES.len();
-const FRAME_SLOTS: usize = 2;
+pub(crate) const FRAME_SLOTS: usize = 8;
 const HISTORY: usize = 240;
 
 pub(crate) struct Profiler {
@@ -139,6 +139,10 @@ impl Profiler {
     }
 
     /// Non-blocking readback of a previously armed slot. Skips if not ready.
+    ///
+    /// A slot is reused only every `FRAME_SLOTS` frames, so a readback 8 frames
+    /// later has time to complete even when the GPU is saturated. Two slots
+    /// were not enough: at 1M instances only 1 of 20 frames resolved.
     pub(crate) fn resolve_slot(&mut self, slot: usize, frame: u64) {
         let (Some(pool), true) = (self.query_pool, self.pending[slot]) else {
             return;

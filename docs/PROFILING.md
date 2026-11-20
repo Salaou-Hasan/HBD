@@ -32,6 +32,24 @@ CSV columns: `frame,cpu_ms,pass_shadow,pass_geometry,pass_taa,pass_ssao,pass_blo
 
 Periodic `info!` summaries report p50/p95/p99 for total GPU, CPU, and each pass over the last 240 frames.
 
+### Readback reliability (fixed in M2)
+
+Timestamp readback uses an 8-slot ring, not 2. With 2 slots, a query was reused before the driver marked it available and `get_query_pool_results` almost always returned `NOT_READY`: a 1M-instance run resolved **1 of 20** frames, making p99 meaningless. With 8 slots the same class of run resolves **112 of 120** frames. Every resolution is still non-blocking; slots simply get 8 frames of slack.
+
+`tools/profile-check.ps1` gates a CSV against pass p99 limits:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/profile-check.ps1 `
+  -CsvPath .\profile.csv -MaxGpuP99Ms 9 -MaxShadowP99Ms 3 `
+  -MaxGeometryP99Ms 2 -MaxSsaoP99Ms 2 -MaxBloomP99Ms 1 -MaxTonemapP99Ms 1
+```
+
+Those limits are the current Intel baseline plus margin. On the 82-cube orbit baseline (120 frames): GPU p50 **3.61 ms**, p99 **8.00 ms**; shadow p99 2.51, geometry 1.61, SSAO 1.66, bloom 0.50, tonemap 0.48 ms.
+
+### 1M-instance stress scene
+
+`--instances 1000000` dispatches a one-time compute pass that fills a device-local buffer with 1,000,000 distinct cubes in a paraboloid bowl (ground slab + 999,999 cubes), drawn with one `vkCmdDrawIndexedIndirect` = **12M triangles**. Intel dev GPU, 1280x720, moving camera, 20 frames: GPU frame **78.4 ms**, of which geometry **76.4 ms**; shadow 0.74, HBTR 0.50, SSAO 0.38, bloom 0.15, tonemap 0.14 ms. This is a correctness/scale demo, not a 60 fps result; the RTX 3060-class gate remains pending.
+
 ## Measured results — Intel UHD / 1280x720 / 900 frames / 120 Hz present
 
 Steady-state window (last 200 frames), GPU milliseconds:

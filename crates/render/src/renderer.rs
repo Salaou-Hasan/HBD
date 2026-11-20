@@ -11,7 +11,7 @@ use crate::bloom::BloomPass;
 use crate::camera::{Camera, DirectionalLight};
 use crate::hbtr::TaaPass;
 use crate::mesh::MeshPass;
-use crate::profiler::Profiler;
+use crate::profiler::{FRAME_SLOTS, Profiler};
 use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
 use crate::ssao::SsaoPass;
@@ -324,7 +324,7 @@ impl Renderer {
         let aspect = extent.width as f32 / extent.height.max(1) as f32;
         let light = *light;
         let frame_number = *frame_index;
-        let slot = (frame_number % 2) as usize;
+        let slot = (frame_number % FRAME_SLOTS as u64) as usize;
         let view_projection = camera.view_projection(aspect);
         let camera_unchanged =
             *pass_cache_enabled && *last_view_projection == Some(view_projection);
