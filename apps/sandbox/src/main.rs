@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use hbd_engine::core::Time;
 use hbd_engine::core::math::Vec3;
+use hbd_engine::ecs::EcsScene;
 use hbd_engine::gfx;
 use hbd_engine::gfx::VulkanContext;
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
 use hbd_engine::render::{Camera, DebugView, Renderer};
+use hbd_engine::scene::{Camera as EcsCamera, Entity, Light as EcsLight};
 use tracing::{error, info, warn};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -15,6 +17,8 @@ use winit::window::Window;
 struct Sandbox {
     time: Time,
     renderer: Option<Renderer>,
+    ecs_scene: EcsScene,
+    camera_entity: Entity,
     static_camera: bool,
     obj_path: Option<PathBuf>,
     profile: bool,
@@ -82,6 +86,17 @@ impl PlatformHandler for Sandbox {
                 {
                     error!(%error, count, "failed to set instance count");
                 }
+                let frame = self.ecs_scene.run();
+                if let Some(light) = frame.light {
+                    renderer.set_light(light);
+                } else {
+                    info!("no ECS light entity; keeping the renderer's default directional light");
+                }
+                info!(
+                    camera = frame.camera.is_some(),
+                    objects = frame.objects.len(),
+                    "ECS scene extracted at renderer creation"
+                );
                 self.renderer = Some(renderer);
             }
             Err(error) => {
@@ -167,10 +182,26 @@ impl PlatformHandler for Sandbox {
         } else {
             seconds * 0.25
         };
-        let camera = Camera::new(
-            Vec3::new(angle.cos() * 9.0, 4.5, angle.sin() * 9.0),
-            Vec3::new(0.0, -0.2, 0.0),
-        );
+        let camera_position = Vec3::new(angle.cos() * 9.0, 4.5, angle.sin() * 9.0);
+        let camera_target = Vec3::new(0.0, -0.2, 0.0);
+        if let Some(mut camera) = self
+            .ecs_scene
+            .world()
+            .get_mut::<EcsCamera>(self.camera_entity)
+        {
+            camera.position = camera_position;
+            camera.target = camera_target;
+        } else {
+            error!(entity = ?self.camera_entity, "ECS camera entity missing");
+        }
+
+        // Explicit ECS schedule run: the camera and light consumed by the
+        // renderer this frame come from entities, not from local temporaries.
+        let frame = self.ecs_scene.run();
+        let camera = frame.camera.unwrap_or_else(|| {
+            warn!("ECS scene produced no camera; using the renderer default");
+            Camera::default()
+        });
 
         let render_result = self
             .renderer
@@ -266,11 +297,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    let mut ecs_scene = EcsScene::new();
+    let camera_entity = ecs_scene
+        .world()
+        .spawn((EcsCamera {
+            position: Vec3::new(9.0, 4.5, 0.0),
+            target: Vec3::new(0.0, -0.2, 0.0),
+            ..Default::default()
+        },))
+        .id();
+    ecs_scene.world().spawn((EcsLight::default(),));
+    info!(?camera_entity, "ECS camera and light entities spawned");
+
     platform::run(
         config,
         Sandbox {
             time: Time::new(),
             renderer: None,
+            ecs_scene,
+            camera_entity,
             static_camera,
             obj_path,
             profile,

@@ -8,3 +8,4 @@ description = "ECS world and scene representation for HBD"
 
 [dependencies]
 bevy_ecs.workspace = true
+glam.workspace = true

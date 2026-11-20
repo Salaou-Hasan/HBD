@@ -16,6 +16,8 @@ pub use hbd_runtime as runtime;
 pub use hbd_scene as scene;
 pub use hbd_script as script;
 
+pub mod ecs;
+
 pub mod prelude {
     pub use hbd_core::math::*;
     pub use hbd_core::{Handle, Time};

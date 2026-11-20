@@ -57,6 +57,9 @@ pub struct Renderer {
     /// Temporary early-visualization override; not part of the asset pipeline.
     obj_path: Option<PathBuf>,
     instance_count: Option<u32>,
+    /// Directional light used by geometry and shadows. Set explicitly by the
+    /// engine's ECS scene bridge; defaults to the M1 light.
+    light: DirectionalLight,
 }
 
 impl Renderer {
@@ -147,7 +150,16 @@ impl Renderer {
             full_frames: 0,
             obj_path,
             instance_count,
+            light,
         })
+    }
+
+    /// Explicit directional-light override, used by the ECS scene bridge.
+    /// Shadow cascades are still built for the default light; this updates the
+    /// geometry/shading uniform from the next frame onward.
+    pub fn set_light(&mut self, light: DirectionalLight) {
+        info!(direction = ?light.direction, intensity = light.intensity, "directional light override applied");
+        self.light = light;
     }
 
     /// Explicit A/B switch for the offscreen-pass cache. Always logged.
@@ -231,10 +243,11 @@ impl Renderer {
             full_frames: _,
             obj_path,
             instance_count,
+            light,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
-        let light = DirectionalLight::default();
+        let light = *light;
 
         let new_targets = RenderTargets::new(context, extent, image_count)?;
         let new_shadow = ShadowPass::new(context, &light)?;
@@ -311,10 +324,11 @@ impl Renderer {
             full_frames,
             obj_path: _,
             instance_count: _,
+            light,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;
-        let light = DirectionalLight::default();
+        let light = *light;
         let frame_number = *frame_index;
         let slot = (frame_number % 2) as usize;
         let view_projection = camera.view_projection(aspect);

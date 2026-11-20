@@ -907,6 +907,7 @@ dependencies = [
 name = "hbd-engine"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "hbd-assets",
  "hbd-audio",
  "hbd-core",
@@ -981,6 +982,7 @@ name = "hbd-scene"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "glam 0.34.3",
 ]
 
 [[package]]
