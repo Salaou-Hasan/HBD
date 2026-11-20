@@ -65,11 +65,16 @@ fn filmic(x: vec3<f32>) -> vec3<f32> {
     return clamp(a / b, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// SSAO is denoised in its own half-res pass; the tonemap samples it once.
+fn sample_ao(uv: vec2<f32>) -> f32 {
+    return textureSample(ao_texture, hdr_sampler, uv).r;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_texture, hdr_sampler, input.uv).rgb;
     let bloom = textureSample(bloom_texture, hdr_sampler, input.uv).rgb;
-    let ao = textureSample(ao_texture, hdr_sampler, input.uv).r;
+    let ao = sample_ao(input.uv);
 
     let lit = (hdr * ao + bloom * 0.12) * 0.9;
     var color = vec3<f32>(0.0);

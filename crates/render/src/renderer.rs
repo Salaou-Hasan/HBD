@@ -18,10 +18,8 @@ use crate::taa::TaaPass;
 use crate::tonemap::TonemapPass;
 use crate::{DebugView, RenderError};
 
-/// TAA is disabled because it produces visible artifacts. Bloom and tonemap
-/// read the raw HDR target instead of the TAA resolve. Set to `true` only after
-/// the temporal resolve itself has been redesigned.
-const TAA_ENABLED: bool = false;
+/// HBD Temporal Resolve (HBTR) is the default AA path. See `docs/ANTI-ALIASING.md`.
+const TAA_ENABLED: bool = true;
 
 /// Timestamp marker indices. They must match the pass order in `PASS_NAMES`.
 const MARK_SHADOW: usize = 1;
@@ -100,7 +98,7 @@ impl Renderer {
             &context,
             presented_views,
             bloom.b_views(),
-            ssao.views(),
+            ssao.denoised_views(),
             targets.depth_views(),
             shadow.views(),
             taa.history_views(),
@@ -234,7 +232,7 @@ impl Renderer {
             context,
             presented_views,
             new_bloom.b_views(),
-            new_ssao.views(),
+            new_ssao.denoised_views(),
             new_targets.depth_views(),
             new_shadow.views(),
             new_taa.history_views(),

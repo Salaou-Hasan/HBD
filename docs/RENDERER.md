@@ -8,7 +8,7 @@ The renderer is rasterization-first, custom, and fully inspectable. It renders a
 |---|---|---|---|
 | 1 | Shadow | 3 × 1024² depth | Directional light, cascades at 12 / 32 / 80 world units, 3×3 PCF |
 | 2 | Geometry | HDR color + depth, per swapchain image | `R16G16B16A16_SFLOAT`; instanced cubes + fullscreen procedural sky |
-| 3 | TAA resolve | resolved HDR | **Bypassed** in M1; see below |
+| 3 | HBTR temporal resolve | resolved HDR | YCoCg variance clipping, confidence blend, sharpening |
 | 4 | SSAO | half-res AO | Depth-based, sampled once in the tonemap |
 | 5 | Bloom | half-res bright pass + blur | Reads the HDR image currently being presented |
 | 6 | Tonemap | swapchain (`B8G8R8A8_SRGB`) | AgX, bloom add, AO multiply, vignette |
@@ -50,17 +50,11 @@ In the sandbox, press:
 
 `Renderer::set_debug_view(DebugView)` exposes the same modes through the engine API.
 
-## TAA status: disabled
+## Anti-aliasing: HBD Temporal Resolve
 
-TAA produced artifacts (visible shake / washed-out accumulation during camera motion). The M1 runtime therefore sets `TAA_ENABLED = false` in `crates/render/src/renderer.rs`:
+`TAA_ENABLED = true` in `crates/render/src/renderer.rs`. HBTR jitters the camera, reprojects a per-image history, rectifies it with YCoCg variance clipping, applies a confidence-based blend and reuses the neighborhood mean for sharpening. Full design, cost, and limitations: [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md). The old disable decision is [ADR 0003](adr/0003-taa-disabled.md) (superseded).
 
-- no sub-pixel camera jitter,
-- no TAA resolve or history work,
-- bloom and tonemap bind the raw HDR target.
-
-The TAA pass remains in the tree with a corrected per-image design: each swapchain image keeps its own previous view-projection pose, initialization flag, and history ping-pong index, because an image is revisited every `image_count` frames rather than every frame. It is kept dormant until the temporal resolve itself is redesigned. Re-enable criteria and rationale are in [ADR 0003](adr/0003-taa-disabled.md).
-
-**SSAO and AgX are unaffected** — both remain active in the shipped path.
+SSAO is additionally denoised in its own half-res bilateral pass, and AgX remains active.
 
 ## Known gaps
 

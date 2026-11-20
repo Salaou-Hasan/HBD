@@ -16,7 +16,7 @@ The engine also has a headless mode for cooking, CI, dedicated servers, and auto
 | `hbd-jobs` | Work-stealing pool configuration; avoids two competing thread pools | Config only |
 | `hbd-platform` | `winit` event loop, window, `WindowConfig` (physical pixels) | Implemented |
 | `hbd-gfx` | Vulkan device/queues/swapchain/sync, `gpu-allocator` RAII buffers and images | Implemented |
-| `hbd-render` | M1 render passes, camera, procedural sky, WGSL shaders, debug views | Implemented (TAA bypassed) |
+| `hbd-render` | M1 render passes, camera, procedural sky, WGSL shaders, HBD Temporal Resolve, debug views | Implemented |
 | `hbd-assets` | `AssetId`, `AssetKind`, handles, streaming budgets, pak design | Types/config only |
 | `hbd-scene` | Standalone `bevy_ecs` world and facade | World + facade; systems pending |
 | `hbd-physics` | Jolt backend selection, 60 Hz fixed tick, interpolation config | Config only |
@@ -71,7 +71,7 @@ HDR geometry pass (R16G16B16A16_SFLOAT + depth, per swapchain image)
         │  instanced PBR cubes, procedural sky, analytic IBL
         ├──────────────► depth ──► SSAO (half res)
         ▼
-TAA resolve [currently bypassed] ──► bloom (half res)
+TAA resolve (HBTR) ──► bloom (half res)
         │                                  │
         └────────► tonemap (AgX) ◄─────────┘
                        │
@@ -79,7 +79,7 @@ TAA resolve [currently bypassed] ──► bloom (half res)
                  swapchain (sRGB)
 ```
 
-Because TAA is bypassed, bloom and tonemap bind the raw HDR views instead of the TAA-resolved views. The switch is `TAA_ENABLED` in `crates/render/src/renderer.rs`. Details in [RENDERER.md](RENDERER.md).
+Bloom and tonemap bind the TAA-resolved views. The explicit switch is `TAA_ENABLED` in `crates/render/src/renderer.rs` (currently enabled). Details in [RENDERER.md](RENDERER.md) and [ANTI-ALIASING.md](ANTI-ALIASING.md).
 
 ## Shader authoring
 

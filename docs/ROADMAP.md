@@ -44,7 +44,7 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 
 **Deliberately not in the shipped M1 path**
 
-- TAA is bypassed (`TAA_ENABLED = false`) because temporal accumulation produced artifacts. The pass and its per-image reprojection state remain in the codebase. See [ADR 0003](adr/0003-taa-disabled.md).
+- **HBD Temporal Resolve (HBTR)** is the default AA path (YCoCg variance clipping, confidence blend, free sharpening), replacing the old disabled TAA. See [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md).
 - Path tracing remains research-only and off by default, enforced by a unit test.
 
 **Exit criteria**
@@ -62,7 +62,7 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 
 Delivered so far: GPU timestamp profiler with CSV export and percentile reports; explicit pass cache with per-image validity and `--no-cache` A/B; resize dedupe. Measured on the Intel dev GPU: static-camera GPU frame p50 **4.074 ms → 0.645 ms** (6.3x) with pixel-identical output; moving camera unchanged (~4.1 ms) and no regression. A precomputed-SSAO-sample experiment was measured as a regression and reverted. Full numbers and the no-hidden-operations rule are in [PROFILING.md](PROFILING.md) and [ADR 0004](adr/0004-visible-operations.md).
 
-Remaining M2 work: GPU-driven indirect/multi-draw (1M items), 10M+ visible triangles, bindless materials, p99 regression dashboard, TAA redesign/custom AA.
+Remaining M2 work: GPU-driven indirect/multi-draw (1M items), 10M+ visible triangles, bindless materials, p99 regression dashboard, motion vectors for HBTR with dynamic objects.
 
 ---
 
@@ -76,10 +76,9 @@ Remaining M2 work: GPU-driven indirect/multi-draw (1M items), 10M+ visible trian
 - Target **10M+ visible triangles** with cluster/frustum culling on the GPU.
 - Bindless descriptor sets and material/texture caching; eliminate per-draw descriptor updates.
 - Frame-time profiling (p50/p99), GPU timestamps, and a regression dashboard.
-- Revisit TAA with motion vectors and a redesigned history/reprojection path; re-enable only if it passes the visual suite.
-- Custom AA research track, judged against the TAA baseline.
+- Character/object motion vectors so HBTR can reproject dynamic objects exactly (camera motion already works).
 
-**Exit criteria:** 1440p/60 fps on RTX 3060-class with the scale targets enabled; no p99 regressions; TAA or its replacement passes the no-ghosting camera-pan test.
+**Exit criteria:** 1440p/60 fps on RTX 3060-class with the scale targets enabled; no p99 regressions; HBTR passes the no-ghosting camera-pan test.
 
 ---
 

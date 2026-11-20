@@ -15,7 +15,7 @@ HBD is a Windows-first, multithreaded 3D game engine written in Rust. It is buil
 - **Visible offscreen pass cache**: with an unchanged camera pose, shadow/geometry/SSAO/bloom are skipped per swapchain image (6.3x GPU reduction in static mode), with `--no-cache` as A/B control.
 - **CI** on Windows runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test --workspace`.
 
-TAA is implemented but **currently disabled in the M1 runtime** (`TAA_ENABLED = false` in `crates/render/src/renderer.rs`) because it produced artifacts. SSAO and AgX are active and were not removed. Path tracing is research-only and off by default. See [RENDERER.md](docs/RENDERER.md) and [ADR 0003](docs/adr/0003-taa-disabled.md).
+- **HBD Temporal Resolve** — an original temporal AA with YCoCg variance clipping and a confidence blend, enabled by default; SSAO is bilaterally denoised. See [ANTI-ALIASING.md](docs/ANTI-ALIASING.md). Path tracing is research-only and off by default.
 
 ## Status
 
@@ -88,9 +88,10 @@ Downstream code should depend on `hbd-engine` only. Internal `hbd-*` crates may 
 - [BUILDING.md](docs/BUILDING.md) — setup, commands, sandbox flags, troubleshooting.
 - [EARLY-OBJ-TEST.md](docs/EARLY-OBJ-TEST.md) — temporary `--obj` hook for seeing a real mesh in the renderer (not the asset pipeline).
 - [PROFILING.md](docs/PROFILING.md) — E2E profiler, measured baseline/after results, A/B procedure, rejected experiment.
+- [ANTI-ALIASING.md](docs/ANTI-ALIASING.md) — how Unity/Godot/UE handle temporal noise and HBD's own HBTR variant.
 - [CONTRIBUTING.md](docs/CONTRIBUTING.md) — conventions and quality gate.
 - [visual-target.md](docs/visual-target.md) — the visual quality bar and M1 acceptance tests.
-- [ADR 0001 — stack](docs/adr/0001-stack.md), [0002 — editor boundary](docs/adr/0002-editor-boundary.md), [0003 — TAA disabled](docs/adr/0003-taa-disabled.md), [0004 — no hidden operations](docs/adr/0004-visible-operations.md).
+- [ADR 0001 — stack](docs/adr/0001-stack.md), [0002 — editor boundary](docs/adr/0002-editor-boundary.md), [0003 — TAA disabled (superseded)](docs/adr/0003-taa-disabled.md), [0004 — no hidden operations](docs/adr/0004-visible-operations.md), [0005 — HBD Temporal Resolve](docs/adr/0005-hbtr.md).
 
 ## Design targets
 

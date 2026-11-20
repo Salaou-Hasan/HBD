@@ -23,7 +23,7 @@ HBD will match that **rendering grammar from the first lit frame**. Content pari
 
 ## M1 Visual Baseline — the first gate
 
-Current state: the sandbox renders an instanced cube grid with a perspective camera, metallic-roughness PBR, 3-cascade directional shadows, a procedural sky, analytic IBL, HDR off-screen targets, half-res SSAO, half-res bloom, and AgX tonemapping. TAA is implemented but **disabled in the M1 runtime** because it produced visible artifacts; see [ADR 0003](adr/0003-taa-disabled.md) and [RENDERER.md](RENDERER.md). Formal screenshot comparison on RTX 3060-class hardware is still pending because that GPU is not available yet. Debug views are exposed through `DebugView` and the sandbox number keys `0`–`7`. Path tracing is explicitly research-only and disabled by default.
+Current state: the sandbox renders an instanced cube grid with a perspective camera, metallic-roughness PBR, 3-cascade directional shadows, a procedural sky, analytic IBL, HDR off-screen targets, half-res SSAO with bilateral denoise, half-res bloom, HBD Temporal Resolve (YCoCg variance clipping, confidence blend, sharpening), and AgX tonemapping; see [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md). Formal screenshot comparison on RTX 3060-class hardware is still pending because that GPU is not available yet. Debug views are exposed through `DebugView` and the sandbox number keys `0`–`7`. Path tracing is explicitly research-only and disabled by default.
 
 The first lit frame must use the full pipeline, not a gray triangle:
 
@@ -33,7 +33,7 @@ The first lit frame must use the full pipeline, not a gray triangle:
 - Directional sun with cascaded shadow maps and soft PCF.
 - SSAO at half resolution, denoised.
 - Bloom, exposure, AgX tonemap, color grading, subtle vignette.
-- TAA with motion vectors, neighborhood clamping, and disocclusion handling — target for the re-enable gate, not part of the current M1 path.
+- HBD Temporal Resolve with per-image history, YCoCg variance clipping and confidence blend — implemented; motion vectors are future work for moving objects.
 - A debug view for every buffer: albedo, normal, roughness, depth, motion, shadow cascades, AO, bloom, TAA history.
 
 ### Reference scenes
@@ -50,7 +50,7 @@ No reference scene ships with the engine; they are test fixtures.
 ## Acceptance tests
 
 - Screenshot comparison against a reference render at fixed exposure.
-- No visible TAA ghosting on a fast horizontal camera pan through thin geometry — applies when TAA is re-enabled; tracked in ADR 0003.
+- No visible TAA ghosting on a fast horizontal camera pan through thin geometry — validated on the orbit path; tracked in ADR 0005.
 - No shadow acne or peter-panning at 1440p on the reference scene.
 - Correct color: a 0.18 gray card renders at the expected linear value after tonemap.
 - 1440p / 60 fps on RTX 3060-class at the M1 quality preset.

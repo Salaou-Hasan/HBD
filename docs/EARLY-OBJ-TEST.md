@@ -60,4 +60,4 @@ Source: `crates/render/src/mesh.rs` (`load_obj`), exposed through `Renderer::new
 - Check the path: the sandbox opens the file directly and reports `OBJ load failed: ...` for missing/unreadable files.
 - Use a simple triangulated OBJ. Exotic exporters, split vertex-normal indexing, or faces before vertices can fail.
 - Confirm the GPU/Vulkan setup first with `--probe`.
-- TAA is disabled in M1; that is unrelated to OBJ loading. Debug views `2` (HDR) and `5` (depth) are useful for isolating geometry problems.
+- HBTR includes half-res denoised SSAO input; debug views `2` (HDR) and `5` (depth) are useful for isolating geometry problems.

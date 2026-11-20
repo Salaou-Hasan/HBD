@@ -1,6 +1,6 @@
 # ADR 0003 — TAA disabled in the M1 runtime
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0005](0005-hbtr.md) — HBD Temporal Resolve is now the default AA path.
 - **Date:** 2026-11-20
 - **Supersedes:** none
 - **Related:** ADR 0001, [visual-target.md](../visual-target.md)

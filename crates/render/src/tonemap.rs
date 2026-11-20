@@ -313,7 +313,11 @@ impl TonemapPass {
             }
         }
 
-        info!(sets = set_count, "HDR tonemap pass ready");
+        info!(
+            sets = set_count,
+            ao_filter = "single tap (SSAO denoised upstream)",
+            "HDR tonemap pass ready"
+        );
 
         Ok(Self {
             device,

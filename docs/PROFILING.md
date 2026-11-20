@@ -60,5 +60,5 @@ A version with 16 SSAO hemisphere offsets precomputed on the CPU into a storage 
 
 - The development GPU is Intel integrated; the RTX 3060-class gate is still pending.
 - The profiler adds eight timestamp writes and one query pool; it is off unless `--profile` is passed.
-- `TemporalHistory` debug view is stale while TAA is disabled; this is unrelated to profiling.
+- `TemporalHistory` debug view shows the read slot captured at pass construction; it may not show the newest ping-pong slot.
 - Valuable next targets from the data are geometry (1.3–1.5 ms) and SSAO (1.2–1.35 ms), which still dominate the moving-camera path. GPU-driven drawing and a redesigned temporal resolve are M2/M3 work.

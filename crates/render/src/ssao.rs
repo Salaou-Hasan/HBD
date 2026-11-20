@@ -13,6 +13,7 @@ use hbd_gfx::{GfxError, GpuBuffer, GpuImage, MemoryLocation, VulkanContext};
 use crate::{Camera, RenderError, shader};
 
 const SSAO_WGSL: &str = include_str!("ssao.wgsl");
+const SSAO_BLUR_WGSL: &str = include_str!("ssao_blur.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
@@ -30,6 +31,9 @@ pub(crate) struct SsaoPass {
     _images: Vec<GpuImage>,
     views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
+    _blurred_images: Vec<GpuImage>,
+    blurred_views: Vec<vk::ImageView>,
+    blurred_framebuffers: Vec<vk::Framebuffer>,
     sampler: vk::Sampler,
     render_pass: vk::RenderPass,
     pipeline: vk::Pipeline,
@@ -37,6 +41,11 @@ pub(crate) struct SsaoPass {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
+    blur_pipeline: vk::Pipeline,
+    blur_layout: vk::PipelineLayout,
+    blur_descriptor_set_layout: vk::DescriptorSetLayout,
+    blur_descriptor_pool: vk::DescriptorPool,
+    blur_descriptor_sets: Vec<vk::DescriptorSet>,
     uniform_buffers: Vec<GpuBuffer>,
     half_extent: vk::Extent2D,
 }
@@ -98,6 +107,43 @@ impl SsaoPass {
             views.push(view);
         }
 
+        // Second half-res target holds the denoised AO that consumers sample.
+        let mut blurred_images = Vec::with_capacity(image_count);
+        let mut blurred_views = Vec::with_capacity(image_count);
+        for _ in 0..image_count {
+            let image = context.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(AO_FORMAT)
+                    .extent(vk::Extent3D {
+                        width: half_extent.width,
+                        height: half_extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED),
+                "HBD SSAO denoised target",
+            )?;
+            let view = unsafe {
+                device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image.image())
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(AO_FORMAT)
+                        .subresource_range(subresource),
+                    None,
+                )
+            }
+            .map_err(GfxError::Vulkan)?;
+            blurred_images.push(image);
+            blurred_views.push(view);
+        }
+
         let sampler = unsafe {
             device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -156,6 +202,24 @@ impl SsaoPass {
         let mut framebuffers = Vec::with_capacity(image_count);
         for view in &views {
             framebuffers.push(
+                unsafe {
+                    device.create_framebuffer(
+                        &vk::FramebufferCreateInfo::default()
+                            .render_pass(render_pass)
+                            .attachments(std::slice::from_ref(view))
+                            .width(half_extent.width)
+                            .height(half_extent.height)
+                            .layers(1),
+                        None,
+                    )
+                }
+                .map_err(GfxError::Vulkan)?,
+            );
+        }
+
+        let mut blurred_framebuffers = Vec::with_capacity(image_count);
+        for view in &blurred_views {
+            blurred_framebuffers.push(
                 unsafe {
                     device.create_framebuffer(
                         &vk::FramebufferCreateInfo::default()
@@ -265,6 +329,82 @@ impl SsaoPass {
             device.destroy_shader_module(fragment_module, None);
         }
 
+        // Denoise pipeline: half-res bilateral cross, 9 taps with depth weights.
+        let blur_vertex_spv =
+            shader::compile_wgsl(SSAO_BLUR_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
+        let blur_fragment_spv =
+            shader::compile_wgsl(SSAO_BLUR_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
+        let blur_vertex_module = create_shader_module(&device, &blur_vertex_spv)?;
+        let blur_fragment_module = create_shader_module(&device, &blur_fragment_spv)?;
+        let blur_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
+        let blur_descriptor_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&blur_bindings),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let blur_set_layouts = [blur_descriptor_set_layout];
+        let blur_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&blur_set_layouts),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let blur_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(blur_vertex_module)
+                .name(VERTEX_ENTRY),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(blur_fragment_module)
+                .name(FRAGMENT_ENTRY),
+        ];
+        let blur_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&blur_stages)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterization)
+            .multisample_state(&multisample)
+            .color_blend_state(&color_blend)
+            .dynamic_state(&dynamic_state)
+            .layout(blur_layout)
+            .render_pass(render_pass)
+            .subpass(0);
+        let blur_pipeline = unsafe {
+            device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&blur_pipeline_info),
+                None,
+            )
+        }
+        .map_err(|(_, error)| RenderError::Pipeline(error))?
+        .into_iter()
+        .next()
+        .ok_or(RenderError::MissingPipeline)?;
+        unsafe {
+            device.destroy_shader_module(blur_vertex_module, None);
+            device.destroy_shader_module(blur_fragment_module, None);
+        }
+
         let mut uniform_buffers = Vec::with_capacity(image_count);
         for _ in 0..image_count {
             uniform_buffers.push(context.create_buffer(
@@ -306,14 +446,46 @@ impl SsaoPass {
         }
         .map_err(GfxError::Vulkan)?;
 
+        let blur_pool_sizes = [
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLER)
+                .descriptor_count(set_count),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(set_count * 2),
+        ];
+        let blur_descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&blur_pool_sizes)
+                    .max_sets(set_count),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let blur_set_layouts = vec![blur_descriptor_set_layout; image_count];
+        let blur_descriptor_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(blur_descriptor_pool)
+                    .set_layouts(&blur_set_layouts),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+
         let sampler_infos = [vk::DescriptorImageInfo::default().sampler(sampler)];
-        for ((set, depth_view), uniform) in descriptor_sets
+        for ((((set, blur_set), depth_view), ao_view), uniform) in descriptor_sets
             .iter()
+            .zip(blur_descriptor_sets.iter())
             .zip(depth_views.iter().copied())
+            .zip(views.iter().copied())
             .zip(uniform_buffers.iter())
         {
             let depth_infos = [vk::DescriptorImageInfo::default()
                 .image_view(depth_view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let ao_infos = [vk::DescriptorImageInfo::default()
+                .image_view(ao_view)
                 .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
             let uniform_infos = [vk::DescriptorBufferInfo::default()
                 .buffer(uniform.buffer())
@@ -339,11 +511,32 @@ impl SsaoPass {
             unsafe {
                 device.update_descriptor_sets(&writes, &[]);
             }
+            let blur_writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*blur_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&sampler_infos),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*blur_set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&ao_infos),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*blur_set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&depth_infos),
+            ];
+            unsafe {
+                device.update_descriptor_sets(&blur_writes, &[]);
+            }
         }
 
         tracing::info!(
             width = half_extent.width,
             height = half_extent.height,
+            denoise = "9-tap bilateral at half resolution",
             "SSAO pass ready"
         );
 
@@ -352,6 +545,9 @@ impl SsaoPass {
             _images: images,
             views,
             framebuffers,
+            _blurred_images: blurred_images,
+            blurred_views,
+            blurred_framebuffers,
             sampler,
             render_pass,
             pipeline,
@@ -359,13 +555,18 @@ impl SsaoPass {
             descriptor_set_layout,
             descriptor_pool,
             descriptor_sets,
+            blur_pipeline,
+            blur_layout,
+            blur_descriptor_set_layout,
+            blur_descriptor_pool,
+            blur_descriptor_sets,
             uniform_buffers,
             half_extent,
         })
     }
 
-    pub(crate) fn views(&self) -> &[vk::ImageView] {
-        &self.views
+    pub(crate) fn denoised_views(&self) -> &[vk::ImageView] {
+        &self.blurred_views
     }
 
     pub(crate) fn update_all(&self, camera: &Camera, aspect: f32) -> Result<(), RenderError> {
@@ -438,6 +639,36 @@ impl SsaoPass {
             );
             self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
             self.device.cmd_end_render_pass(command_buffer);
+
+            // Bilateral denoise into the secondary target that consumers sample.
+            let blur_info = vk::RenderPassBeginInfo::default()
+                .render_pass(self.render_pass)
+                .framebuffer(self.blurred_framebuffers[image_index as usize])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.half_extent,
+                })
+                .clear_values(&clear_values);
+            self.device.cmd_begin_render_pass(
+                command_buffer,
+                &blur_info,
+                vk::SubpassContents::INLINE,
+            );
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.blur_pipeline,
+            );
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.blur_layout,
+                0,
+                std::slice::from_ref(&self.blur_descriptor_sets[image_index as usize]),
+                &[],
+            );
+            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            self.device.cmd_end_render_pass(command_buffer);
         }
     }
 }
@@ -446,17 +677,29 @@ impl Drop for SsaoPass {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline(self.blur_pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
+            self.device.destroy_pipeline_layout(self.blur_layout, None);
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device
+                .destroy_descriptor_pool(self.blur_descriptor_pool, None);
+            self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.blur_descriptor_set_layout, None);
             for framebuffer in &self.framebuffers {
+                self.device.destroy_framebuffer(*framebuffer, None);
+            }
+            for framebuffer in &self.blurred_framebuffers {
                 self.device.destroy_framebuffer(*framebuffer, None);
             }
             self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_sampler(self.sampler, None);
             for view in &self.views {
+                self.device.destroy_image_view(*view, None);
+            }
+            for view in &self.blurred_views {
                 self.device.destroy_image_view(*view, None);
             }
         }
