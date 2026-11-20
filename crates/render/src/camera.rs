@@ -79,7 +79,7 @@ impl Default for DirectionalLight {
         Self {
             direction: Vec3::new(0.35, 0.85, 0.4).normalize(),
             color: Vec3::new(1.0, 0.96, 0.9),
-            intensity: 1.4,
+            intensity: 1.0,
         }
     }
 }
