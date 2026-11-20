@@ -151,22 +151,6 @@ impl Renderer {
         })
     }
 
-    /// Explicit debug readback of the last cull's visible/total counts. Stalls
-    /// the queue; used only by the opt-in `--cull-stats` logging path.
-    pub fn cull_counts(&self) -> Result<(u32, u32), RenderError> {
-        let visible = self.mesh.read_visible_count(&self.context)?;
-        Ok((visible, self.mesh.total_count()))
-    }
-
-    /// Explicit A/B switch for GPU frustum culling. Toggling invalidates the
-    /// pass cache so the next frame re-culls with the new setting.
-    pub fn set_culling_enabled(&mut self, enabled: bool) {
-        self.mesh.set_culling_enabled(enabled);
-        self.last_view_projection = None;
-        self.pass_valid.fill(false);
-        info!(enabled, "GPU frustum culling explicitly toggled");
-    }
-
     /// Explicit directional-light override, used by the ECS scene bridge.
     /// Shadow cascades are still built for the default light; this updates the
     /// geometry/shading uniform from the next frame onward.
@@ -436,11 +420,6 @@ impl Renderer {
                     }
 
                     if !reuse {
-                        // Cull and compact before the geometry render pass. The
-                        // barrier inside makes the compacted buffer and the
-                        // indirect count visible to the draw.
-                        mesh.dispatch_cull(command_buffer);
-
                         let render_pass_info = vk::RenderPassBeginInfo::default()
                             .render_pass(targets.render_pass())
                             .framebuffer(targets.framebuffer(image_index))

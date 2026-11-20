@@ -121,32 +121,6 @@ impl GpuBuffer {
 
         Ok(())
     }
-
-    /// Copies bytes out of persistently mapped host-visible memory. Used by
-    /// explicit debug readbacks (for example the GPU cull count); never called
-    /// implicitly by a render frame.
-    pub fn read(&self, data: &mut [u8]) -> Result<(), GfxError> {
-        if data.len() as u64 > self.size {
-            return Err(GfxError::BufferOverflow);
-        }
-        let Some(mapped) = self.mapped else {
-            return Err(GfxError::NotHostVisible);
-        };
-        if !self.host_coherent
-            && let Some(allocation) = self.allocation.as_ref()
-        {
-            let range = [vk::MappedMemoryRange::default()
-                .memory(unsafe { allocation.memory() })
-                .offset(allocation.offset())
-                .size(allocation.size())];
-            unsafe { self.device.invalidate_mapped_memory_ranges(&range) }
-                .map_err(GfxError::Vulkan)?;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(mapped.as_ptr(), data.as_mut_ptr(), data.len());
-        }
-        Ok(())
-    }
 }
 
 impl Drop for GpuBuffer {
