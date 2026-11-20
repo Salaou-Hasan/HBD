@@ -21,6 +21,7 @@ struct Sandbox {
     profile_path: Option<PathBuf>,
     profile_interval: u32,
     no_cache: bool,
+    instances: Option<u32>,
 }
 
 impl Drop for Sandbox {
@@ -72,6 +73,11 @@ impl PlatformHandler for Sandbox {
                     info!("E2E profiler not requested; no GPU timestamps recorded");
                 }
                 renderer.set_pass_cache_enabled(!self.no_cache);
+                if let Some(count) = self.instances
+                    && let Err(error) = renderer.set_instance_count(count)
+                {
+                    error!(%error, count, "failed to set instance count");
+                }
                 self.renderer = Some(renderer);
             }
             Err(error) => {
@@ -218,11 +224,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|pair| pair[1].parse::<u32>().ok())
         .unwrap_or(120);
     let no_cache = args.iter().any(|arg| arg == "--no-cache");
+    let instances = args
+        .windows(2)
+        .find(|pair| pair[0] == "--instances")
+        .and_then(|pair| pair[1].parse::<u32>().ok());
     info!(
         profile,
         ?profile_path,
         profile_interval,
         no_cache,
+        instances,
         "sandbox profiling configuration"
     );
 
@@ -248,6 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile_path,
             profile_interval,
             no_cache,
+            instances,
         },
     )?;
     Ok(())

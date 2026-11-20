@@ -37,6 +37,7 @@ cargo build -p hbd-sandbox
 | `--probe` | Print Vulkan loader/device information and exit without a window. |
 | `--static-camera` | Freeze the camera at angle 0, useful for image comparisons. |
 | `--obj <path>` | **Temporary early test**: replace the cube grid with one OBJ mesh. Not the asset pipeline; see [EARLY-OBJ-TEST.md](EARLY-OBJ-TEST.md). |
+| `--instances N` | **Stress test**: override the indirect instance count. Counts above the 82 source cubes repeat that set modulo its count; logged as an override. |
 | `--no-cache` | Force the full offscreen pipeline every frame (A/B control for the pass cache). |
 | `--profile` | Enable GPU timestamp queries and CPU frame timing. |
 | `--profile-report <path>` | Write a CSV profile on shutdown. |

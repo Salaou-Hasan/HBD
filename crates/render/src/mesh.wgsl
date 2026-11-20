@@ -47,7 +47,8 @@ fn vs_main(
     input: VertexInput,
     @builtin(instance_index) instance_index: u32,
 ) -> VertexOutput {
-    let instance = instances[instance_index];
+    let base_count = max(u32(frame.shadow_splits.w), 1u);
+    let instance = instances[instance_index % base_count];
     let world_position = instance.model * vec4<f32>(input.position, 1.0);
 
     var output: VertexOutput;

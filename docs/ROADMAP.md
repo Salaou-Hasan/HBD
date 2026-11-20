@@ -66,7 +66,7 @@ Remaining M2 work: GPU-driven indirect/multi-draw scale-up (1M items), 10M+ visi
 
 **Motion-vector attempt (reverted):** a velocity attachment and HBTR velocity transform were implemented but produced corrupted imagery even with AA disabled, so the whole attempt was reverted to the last clean commit. No half-working code is left in the tree.
 
-**Indirect draw delivered:** `MeshPass` now issues one `vkCmdDrawIndexedIndirect` with counts from a GPU buffer instead of a CPU-side direct draw. Before/after captures at the same camera pose are pixel-identical (mean diff 0), so this is a pure plumbing change that removes the CPU draw-parameter path and gives compute culling a place to write.
+**Instance-count stress mode:** `--instances N` overrides the indirect instance count. Counts above the 82 source cubes repeat that source set modulo its count; this is an explicit GPU-throughput stress mode, not a scene of unique objects, and is logged as an override. It ran 100,000 instances on the Intel dev GPU without errors.
 
 ---
 

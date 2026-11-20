@@ -144,6 +144,17 @@ impl Renderer {
         }
     }
 
+    /// Explicit instance-count override for GPU-throughput testing.
+    pub fn set_instance_count(&mut self, count: u32) -> Result<(), RenderError> {
+        self.mesh.set_instance_count(count)?;
+        tracing::info!(
+            count,
+            base = "indirect draw",
+            "instance count override applied"
+        );
+        Ok(())
+    }
+
     /// Explicitly enables E2E profiling. Every subsequent pass records visible
     /// timestamps; a periodic summary is logged and an optional CSV is written
     /// by `finish_profiling`.

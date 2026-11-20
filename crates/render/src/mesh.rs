@@ -69,6 +69,8 @@ pub(crate) struct MeshPass {
     /// GPU-readable draw parameters for `vkCmdDrawIndexedIndirect`.
     indirect_buffer: GpuBuffer,
     uniform_buffer: GpuBuffer,
+    index_count: u32,
+    base_count: u32,
 }
 
 impl MeshPass {
@@ -297,18 +299,16 @@ impl MeshPass {
             bytemuck::cast_slice(&instances),
             "HBD instance buffer",
         )?;
-        let draw = [
-            indices.len() as u32,
-            instances.len() as u32,
-            0u32,
-            0u32,
-            0u32,
-        ];
-        let indirect_buffer = context.upload_buffer(
+        let index_count = indices.len() as u32;
+        let base_count = instances.len() as u32;
+        let draw = [index_count, base_count, 0u32, 0u32, 0u32];
+        let indirect_buffer = context.create_buffer(
+            size_of::<[u32; 5]>() as u64,
             vk::BufferUsageFlags::INDIRECT_BUFFER,
-            bytemuck::cast_slice(&draw),
+            MemoryLocation::CpuToGpu,
             "HBD indirect draw",
         )?;
+        indirect_buffer.write(bytemuck::cast_slice(&draw))?;
         let uniform_buffer = context.create_buffer(
             size_of::<FrameUniform>() as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
@@ -422,6 +422,8 @@ impl MeshPass {
             _instance_buffer: instance_buffer,
             indirect_buffer,
             uniform_buffer,
+            index_count,
+            base_count,
         })
     }
 
@@ -447,11 +449,22 @@ impl MeshPass {
                 light.color.z * light.intensity,
                 0.06,
             ],
-            shadow_splits: [12.0, 32.0, 80.0, 0.0],
+            shadow_splits: [12.0, 32.0, 80.0, self.base_count as f32],
         };
 
         self.uniform_buffer
             .write(bytemuck::bytes_of(&uniform))
+            .map_err(RenderError::Gfx)
+    }
+
+    /// Override the indirect instance count. Values above the source instance
+    /// count repeat that source set; this is a GPU-throughput stress mode, not
+    /// a scene of unique objects. Always called explicitly and logged by the
+    /// renderer.
+    pub(crate) fn set_instance_count(&self, count: u32) -> Result<(), RenderError> {
+        let draw = [self.index_count, count, 0u32, 0u32, 0u32];
+        self.indirect_buffer
+            .write(bytemuck::cast_slice(&draw))
             .map_err(RenderError::Gfx)
     }
 
