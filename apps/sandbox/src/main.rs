@@ -1,0 +1,196 @@
+use std::sync::Arc;
+
+use hbd_engine::core::Time;
+use hbd_engine::core::math::Vec3;
+use hbd_engine::gfx;
+use hbd_engine::gfx::VulkanContext;
+use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
+use hbd_engine::render::{Camera, DebugView, Renderer};
+use tracing::{error, info, warn};
+use winit::event::{ElementState, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::Window;
+
+struct Sandbox {
+    time: Time,
+    renderer: Option<Renderer>,
+    static_camera: bool,
+}
+
+impl PlatformHandler for Sandbox {
+    fn on_window_created(&mut self, window: &Arc<Window>) {
+        let size = window.inner_size();
+        info!(width = size.width, height = size.height, "window created");
+
+        if let Err(error) = log_vulkan() {
+            warn!("Vulkan probe failed: {error}");
+        }
+
+        let context = match VulkanContext::new(&**window, size.width, size.height) {
+            Ok(context) => context,
+            Err(error) => {
+                error!("failed to initialize the Vulkan context: {error}");
+                return;
+            }
+        };
+
+        match Renderer::new(context) {
+            Ok(renderer) => {
+                info!(
+                    extent = ?renderer.swapchain_extent(),
+                    format = ?renderer.swapchain_format(),
+                    "renderer ready"
+                );
+                self.renderer = Some(renderer);
+            }
+            Err(error) => {
+                error!("failed to initialize the renderer: {error}");
+            }
+        }
+    }
+
+    fn on_window_event(&mut self, _window: &Arc<Window>, event: &WindowEvent) {
+        match event {
+            WindowEvent::Resized(size) => {
+                info!(width = size.width, height = size.height, "window resized");
+
+                let resize_result = self
+                    .renderer
+                    .as_mut()
+                    .map(|renderer| renderer.resize(size.width, size.height));
+
+                if let Some(Err(error)) = resize_result {
+                    error!("failed to resize the swapchain: {error}");
+                    self.renderer = None;
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed {
+                    let code = match event.physical_key {
+                        PhysicalKey::Code(code) => code,
+                        PhysicalKey::Unidentified(_) => return,
+                    };
+                    let view = match code {
+                        KeyCode::Digit0 => Some(DebugView::Final),
+                        KeyCode::Digit1 => Some(DebugView::Filmic),
+                        KeyCode::Digit2 => Some(DebugView::Hdr),
+                        KeyCode::Digit3 => Some(DebugView::Bloom),
+                        KeyCode::Digit4 => Some(DebugView::AmbientOcclusion),
+                        KeyCode::Digit5 => Some(DebugView::Depth),
+                        KeyCode::Digit6 => Some(DebugView::ShadowCascade),
+                        KeyCode::Digit7 => Some(DebugView::TemporalHistory),
+                        _ => None,
+                    };
+                    if let Some(view) = view
+                        && let Some(renderer) = self.renderer.as_ref()
+                    {
+                        if let Err(error) = renderer.set_debug_view(view) {
+                            error!("failed to set debug view: {error}");
+                        } else {
+                            info!(?view, "debug view");
+                        }
+                    }
+                }
+            }
+            WindowEvent::CloseRequested => info!("close requested"),
+            _ => {}
+        }
+    }
+
+    fn on_redraw(&mut self, _window: &Arc<Window>) {
+        self.time.tick();
+
+        let seconds = self.time.elapsed_secs() as f32;
+        let clear_color = [
+            0.015 + 0.005 * (seconds * 0.70).sin(),
+            0.025 + 0.008 * (seconds * 1.10).sin(),
+            0.055 + 0.015 * (seconds * 1.70).sin(),
+            1.0,
+        ];
+        let angle = if self.static_camera {
+            0.0
+        } else {
+            seconds * 0.25
+        };
+        let camera = Camera::new(
+            Vec3::new(angle.cos() * 9.0, 4.5, angle.sin() * 9.0),
+            Vec3::new(0.0, -0.2, 0.0),
+        );
+
+        let render_result = self
+            .renderer
+            .as_mut()
+            .map(|renderer| renderer.render(&camera, clear_color));
+
+        if let Some(Err(error)) = render_result {
+            error!("frame presentation failed: {error}");
+            self.renderer = None;
+        }
+
+        if self.time.frame().is_multiple_of(120) {
+            let delta = self.time.delta_secs();
+            if delta > 0.0 {
+                info!(frame = self.time.frame(), fps = 1.0 / delta, "frame");
+            }
+        }
+    }
+}
+
+fn log_vulkan() -> Result<(), gfx::GfxError> {
+    let info = gfx::probe()?;
+
+    info!(
+        loader = %gfx::version_string(info.loader_version),
+        "Vulkan loader ready"
+    );
+
+    for device in info.devices {
+        info!(
+            name = %device.name,
+            api = %gfx::version_string(device.api_version),
+            kind = ?device.device_type,
+            "Vulkan device"
+        );
+    }
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|arg| arg == "--probe") {
+        log_vulkan()?;
+        return Ok(());
+    }
+
+    let static_camera = args.iter().any(|arg| arg == "--static-camera");
+
+    let max_frames: Option<u64> = args
+        .windows(2)
+        .find(|pair| pair[0] == "--frames")
+        .and_then(|pair| pair[1].parse().ok());
+
+    let config = WindowConfig {
+        title: "HBD - M1".to_owned(),
+        max_frames,
+        ..Default::default()
+    };
+
+    platform::run(
+        config,
+        Sandbox {
+            time: Time::new(),
+            renderer: None,
+            static_camera,
+        },
+    )?;
+    Ok(())
+}

@@ -1,0 +1,20 @@
+[package]
+name = "hbd-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Public facade for the HBD engine"
+
+[dependencies]
+hbd-assets.workspace = true
+hbd-audio.workspace = true
+hbd-core.workspace = true
+hbd-gfx.workspace = true
+hbd-jobs.workspace = true
+hbd-physics.workspace = true
+hbd-platform.workspace = true
+hbd-render.workspace = true
+hbd-runtime.workspace = true
+hbd-scene.workspace = true
+hbd-script.workspace = true

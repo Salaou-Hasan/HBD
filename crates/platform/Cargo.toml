@@ -1,0 +1,12 @@
+[package]
+name = "hbd-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Windowing and OS integration for HBD"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+winit.workspace = true

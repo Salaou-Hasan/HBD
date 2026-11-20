@@ -1,0 +1,11 @@
+[package]
+name = "hbd-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Foundation types for the HBD engine"
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true

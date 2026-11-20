@@ -1,0 +1,23 @@
+# Rust
+target/
+**/target/
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Engine
+*.pak
+*.hbd
+/logs/
+/screenshots/

@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/sandbox",
+    "crates/core",
+    "crates/jobs",
+    "crates/platform",
+    "crates/gfx",
+    "crates/render",
+    "crates/assets",
+    "crates/scene",
+    "crates/physics",
+    "crates/script",
+    "crates/audio",
+    "crates/runtime",
+    "crates/engine",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+hbd-core = { path = "crates/core" }
+hbd-jobs = { path = "crates/jobs" }
+hbd-platform = { path = "crates/platform" }
+hbd-gfx = { path = "crates/gfx" }
+hbd-render = { path = "crates/render" }
+hbd-assets = { path = "crates/assets" }
+hbd-scene = { path = "crates/scene" }
+hbd-physics = { path = "crates/physics" }
+hbd-script = { path = "crates/script" }
+hbd-audio = { path = "crates/audio" }
+hbd-runtime = { path = "crates/runtime" }
+hbd-engine = { path = "crates/engine" }
+
+ash = "0.38"
+ash-window = "0.13"
+bytemuck = { version = "1", features = ["derive"] }
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+bevy_ecs = "0.20.1"
+glam = { version = "0.34", features = ["serde"] }
+naga = { version = "30.0.2", features = ["wgsl-in", "spv-out"] }
+raw-window-handle = "0.6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+winit = "0.30.13"
