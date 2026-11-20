@@ -1,8 +1,9 @@
 //! Renderer architecture.
 //!
-//! The current milestone owns a shadow → HDR geometry → tonemap pipeline with
-//! an instanced mesh pass, procedural sky, and analytic IBL. Remaining M1 work
-//! (PBR, CSM, SSAO, bloom, AgX, TAA, debug views) lands in the next steps.
+//! M1 owns a shadow → HDR geometry → tonemap pipeline with an instanced mesh
+//! pass, procedural sky, analytic IBL, cascaded shadows, SSAO, bloom, and AgX
+//! tonemapping. The TAA pass is implemented but bypassed at runtime; see
+//! `docs/RENDERER.md` and `docs/adr/0003-taa-disabled.md`.
 //!
 //! Path tracing is research-only and disabled by default in `RendererConfig`.
 
@@ -78,7 +79,8 @@ pub enum RenderPath {
 pub enum AntiAliasing {
     Off,
     Msaa(u32),
-    /// Default shipping path.
+    /// Temporal AA. Implemented, but bypassed by the M1 runtime because it
+    /// produced artifacts; see `docs/adr/0003-taa-disabled.md`.
     #[default]
     Taa,
     /// Research track; enabled only when it wins the visual test suite.
