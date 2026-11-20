@@ -51,9 +51,12 @@ impl PlatformHandler for Sandbox {
             }
         };
 
-        let renderer = match self.obj_path.as_deref() {
-            Some(path) => Renderer::new_with_obj(context, path),
-            None => Renderer::new(context),
+        let renderer = if let Some(path) = self.obj_path.as_deref() {
+            Renderer::new_with_obj(context, path)
+        } else if let Some(count) = self.instances {
+            Renderer::new_with_instance_count(context, count)
+        } else {
+            Renderer::new(context)
         };
         match renderer {
             Ok(mut renderer) => {

@@ -1,6 +1,8 @@
 // Temporary GPU-generation stress path for M2. This is not the shipping scene
-// format and not the asset pipeline: it fills an instance buffer with a
-// deterministic grid so the indirect draw path can be exercised at scale.
+// format and not the asset pipeline: it fills an instance buffer with a bowl
+// of cubes so the indirect draw path can be exercised at scale. The cubes are
+// distributed through a paraboloid volume; this is a static stress scene, not
+// a physics simulation.
 struct Instance {
     model: mat4x4<f32>,
     previous_model: mat4x4<f32>,
@@ -10,6 +12,8 @@ struct Instance {
 
 @group(0) @binding(0) var<storage, read_write> instances: array<Instance>;
 
+const GOLDEN_ANGLE: f32 = 2.39996323;
+
 @compute @workgroup_size(256)
 fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
@@ -18,13 +22,33 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let side = u32(ceil(pow(f32(total), 1.0 / 3.0)));
-    let x = index % side;
-    let y = (index / side) % side;
-    let z = index / (side * side);
-    let center = (f32(side) - 1.0) * 0.5;
-    let position = (vec3<f32>(f32(x), f32(y), f32(z)) - vec3<f32>(center)) * 1.5;
-    let scale = 0.4;
+    let radius = 4.0;
+    let depth = 2.0;
+
+    if (index == 0u) {
+        let ground_model = mat4x4<f32>(
+            vec4<f32>(10.0, 0.0, 0.0, 0.0),
+            vec4<f32>(0.0, 0.2, 0.0, 0.0),
+            vec4<f32>(0.0, 0.0, 10.0, 0.0),
+            vec4<f32>(0.0, -2.1, 0.0, 1.0),
+        );
+        instances[index].model = ground_model;
+        instances[index].previous_model = ground_model;
+        instances[index].base_color = vec4<f32>(0.12, 0.13, 0.15, 1.0);
+        instances[index].material = vec4<f32>(0.0, 0.92, 1.0, 0.0);
+        return;
+    }
+
+    let sample = f32(index - 1u) + 0.5;
+    let count = f32(total - 1u);
+    let t = sample / count;
+    let angle = GOLDEN_ANGLE * sample;
+    let r = radius * sqrt(t);
+    let x = r * cos(angle);
+    let z = r * sin(angle);
+    let y = depth * t * t - depth;
+    let position = vec3<f32>(x, y, z);
+    let scale = 0.22;
     let model = mat4x4<f32>(
         vec4<f32>(scale, 0.0, 0.0, 0.0),
         vec4<f32>(0.0, scale, 0.0, 0.0),
@@ -32,19 +56,16 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         vec4<f32>(position, 1.0),
     );
 
-    let palette_index = index % 6u;
-    var base_color = vec4<f32>(0.78, 0.28, 0.22, 1.0);
-    switch palette_index {
-        case 1u: { base_color = vec4<f32>(0.22, 0.34, 0.82, 1.0); }
-        case 2u: { base_color = vec4<f32>(0.20, 0.72, 0.34, 1.0); }
-        case 3u: { base_color = vec4<f32>(0.82, 0.74, 0.20, 1.0); }
-        case 4u: { base_color = vec4<f32>(0.74, 0.20, 0.74, 1.0); }
-        case 5u: { base_color = vec4<f32>(0.18, 0.78, 0.78, 1.0); }
-        default: { base_color = vec4<f32>(0.78, 0.28, 0.22, 1.0); }
-    }
+    let rim = clamp(r / radius, 0.0, 1.0);
+    let base_color = vec4<f32>(
+        0.18 + rim * 0.62,
+        0.24 + (1.0 - rim) * 0.45,
+        0.78 - rim * 0.45,
+        1.0,
+    );
 
     instances[index].model = model;
     instances[index].previous_model = model;
     instances[index].base_color = base_color;
-    instances[index].material = vec4<f32>(0.2, 0.4, 1.0, 0.0);
+    instances[index].material = vec4<f32>(0.15, 0.42, 1.0, 0.0);
 }

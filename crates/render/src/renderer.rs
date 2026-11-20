@@ -56,11 +56,12 @@ pub struct Renderer {
     full_frames: u64,
     /// Temporary early-visualization override; not part of the asset pipeline.
     obj_path: Option<PathBuf>,
+    instance_count: Option<u32>,
 }
 
 impl Renderer {
     pub fn new(context: VulkanContext) -> Result<Self, RenderError> {
-        Self::create(context, None)
+        Self::create(context, None, None)
     }
 
     /// Early-validation hook: render a single OBJ instead of the cube grid.
@@ -69,10 +70,22 @@ impl Renderer {
         context: VulkanContext,
         obj_path: impl AsRef<Path>,
     ) -> Result<Self, RenderError> {
-        Self::create(context, Some(obj_path.as_ref().to_path_buf()))
+        Self::create(context, Some(obj_path.as_ref().to_path_buf()), None)
     }
 
-    fn create(context: VulkanContext, obj_path: Option<PathBuf>) -> Result<Self, RenderError> {
+    /// GPU-throughput stress mode: generate `count` cubes on the GPU.
+    pub fn new_with_instance_count(
+        context: VulkanContext,
+        count: u32,
+    ) -> Result<Self, RenderError> {
+        Self::create(context, None, Some(count))
+    }
+
+    fn create(
+        context: VulkanContext,
+        obj_path: Option<PathBuf>,
+        instance_count: Option<u32>,
+    ) -> Result<Self, RenderError> {
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
         let light = DirectionalLight::default();
@@ -86,6 +99,10 @@ impl Renderer {
             shadow.sampler(),
             obj_path.as_deref(),
         )?;
+        if let Some(count) = instance_count {
+            mesh.set_instance_count(count)?;
+            info!(count, "instance count override applied at construction");
+        }
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
@@ -129,6 +146,7 @@ impl Renderer {
             cached_frames: 0,
             full_frames: 0,
             obj_path,
+            instance_count,
         })
     }
 
@@ -212,6 +230,7 @@ impl Renderer {
             cached_frames: _,
             full_frames: _,
             obj_path,
+            instance_count,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
@@ -257,6 +276,10 @@ impl Renderer {
         *mesh = new_mesh;
         *shadow = new_shadow;
         *targets = new_targets;
+        if let Some(count) = *instance_count {
+            mesh.set_instance_count(count)?;
+            info!(count, "instance count override reapplied after resize");
+        }
         *last_view_projection = None;
         *pass_valid = vec![false; image_count];
         tracing::info!(
@@ -287,6 +310,7 @@ impl Renderer {
             cached_frames,
             full_frames,
             obj_path: _,
+            instance_count: _,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;
