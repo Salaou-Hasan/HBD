@@ -21,6 +21,7 @@ const MESH_WGSL: &str = include_str!("mesh.wgsl");
 const SKY_WGSL: &str = include_str!("sky.wgsl");
 const MESH_GENERATE_WGSL: &str = include_str!("mesh_generate.wgsl");
 const CULL_WGSL: &str = include_str!("cull.wgsl");
+const CLUSTER_WGSL: &str = include_str!("cluster.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const GRID_HALF_EXTENT: i32 = 4;
@@ -61,7 +62,8 @@ pub(crate) struct Instance {
 struct CullUniform {
     planes: [[f32; 4]; 6],
     count: u32,
-    pad: [u32; 3],
+    cluster_count: u32,
+    pad: [u32; 2],
 }
 
 pub(crate) struct MeshPass {
@@ -95,6 +97,17 @@ pub(crate) struct MeshPass {
     cull_readback: GpuBuffer,
     cull_enabled: bool,
     count_override: Option<u32>,
+    /// Cluster hierarchy: conservative bounds + per-image visibility flags.
+    cluster_count: u32,
+    _cluster_bounds: GpuBuffer,
+    cluster_flags: Vec<GpuBuffer>,
+    cluster_init_pipeline: vk::Pipeline,
+    cluster_cull_pipeline: vk::Pipeline,
+    cluster_layout: vk::PipelineLayout,
+    cluster_set_layout: vk::DescriptorSetLayout,
+    cluster_pool: vk::DescriptorPool,
+    _cluster_init_set: vk::DescriptorSet,
+    cluster_sets: Vec<vk::DescriptorSet>,
     uniform_buffer: GpuBuffer,
     index_count: u32,
     base_count: u32,
@@ -530,6 +543,11 @@ impl MeshPass {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let cull_set_layout = unsafe {
             device.create_descriptor_set_layout(
@@ -574,7 +592,7 @@ impl MeshPass {
                             .descriptor_count(image_count),
                         vk::DescriptorPoolSize::default()
                             .ty(vk::DescriptorType::STORAGE_BUFFER)
-                            .descriptor_count(image_count * 3),
+                            .descriptor_count(image_count * 4),
                     ])
                     .max_sets(image_count),
                 None,
@@ -602,6 +620,203 @@ impl MeshPass {
             MemoryLocation::CpuToGpu,
             "HBD cull readback",
         )?;
+
+        // --- Cluster hierarchy --------------------------------------------
+        let cluster_count = base_count.div_ceil(256);
+        let cluster_bounds = context.create_buffer(
+            u64::from(cluster_count) * 16,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            MemoryLocation::GpuOnly,
+            "HBD cluster bounds",
+        )?;
+        let mut cluster_flags = Vec::with_capacity(image_count as usize);
+        for _ in 0..image_count {
+            cluster_flags.push(context.create_buffer(
+                u64::from(cluster_count) * 4,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::GpuOnly,
+                "HBD cluster flags",
+            )?);
+        }
+        let init_spv = shader::compile_wgsl(CLUSTER_WGSL, "init_cs", naga::ShaderStage::Compute)?;
+        let cull_spv =
+            shader::compile_wgsl(CLUSTER_WGSL, "cluster_cull_cs", naga::ShaderStage::Compute)?;
+        let init_module = create_shader_module(&device, &init_spv)?;
+        let cull_module = create_shader_module(&device, &cull_spv)?;
+        let cluster_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let cluster_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&cluster_bindings),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cluster_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[cluster_set_layout]),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cluster_pipeline = |module: vk::ShaderModule,
+                                entry: &std::ffi::CStr|
+         -> Result<vk::Pipeline, RenderError> {
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(entry);
+            let info = vk::ComputePipelineCreateInfo::default()
+                .layout(cluster_layout)
+                .stage(stage);
+            unsafe {
+                device
+                    .create_compute_pipelines(
+                        vk::PipelineCache::null(),
+                        std::slice::from_ref(&info),
+                        None,
+                    )
+                    .map_err(|(_, error)| RenderError::Pipeline(error))?
+                    .into_iter()
+                    .next()
+                    .ok_or(RenderError::MissingPipeline)
+            }
+        };
+        let cluster_init_pipeline = cluster_pipeline(init_module, c"init_cs")?;
+        let cluster_cull_pipeline = cluster_pipeline(cull_module, c"cluster_cull_cs")?;
+        unsafe {
+            device.destroy_shader_module(init_module, None);
+            device.destroy_shader_module(cull_module, None);
+        }
+
+        let cluster_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_count(image_count + 1),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_BUFFER)
+                            .descriptor_count(4 * (image_count + 1)),
+                    ])
+                    .max_sets(image_count + 1),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cluster_alloc_layouts = vec![cluster_set_layout; (image_count + 1) as usize];
+        let cluster_allocated = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(cluster_pool)
+                    .set_layouts(&cluster_alloc_layouts),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let cluster_init_set = cluster_allocated[0];
+        let cluster_sets: Vec<vk::DescriptorSet> = cluster_allocated[1..].to_vec();
+
+        // Bounds init needs count/cluster_count only; zeros in the plane slots.
+        cull_uniform
+            .write(bytemuck::bytes_of(&CullUniform {
+                planes: [[0.0; 4]; 6],
+                count: base_count,
+                cluster_count,
+                pad: [0; 2],
+            }))
+            .map_err(RenderError::Gfx)?;
+        let cull_uniform_info = [vk::DescriptorBufferInfo::default()
+            .buffer(cull_uniform.buffer())
+            .offset(0)
+            .range(cull_uniform.size())];
+        let source_info = [vk::DescriptorBufferInfo::default()
+            .buffer(instance_buffer.buffer())
+            .offset(0)
+            .range(instance_buffer.size())];
+        let bounds_info = [vk::DescriptorBufferInfo::default()
+            .buffer(cluster_bounds.buffer())
+            .offset(0)
+            .range(cluster_bounds.size())];
+        let write_cluster_set = |set: vk::DescriptorSet, flags: &GpuBuffer| {
+            let flags_info = [vk::DescriptorBufferInfo::default()
+                .buffer(flags.buffer())
+                .offset(0)
+                .range(flags.size())];
+            unsafe {
+                device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&source_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&bounds_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(&cull_uniform_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(set)
+                            .dst_binding(3)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&flags_info),
+                    ],
+                    &[],
+                );
+            }
+        };
+        write_cluster_set(cluster_init_set, &cluster_flags[0]);
+        for (index, set) in cluster_sets.iter().enumerate() {
+            write_cluster_set(*set, &cluster_flags[index]);
+        }
+        context.one_time_commands(|device, command_buffer| unsafe {
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                cluster_init_pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                cluster_layout,
+                0,
+                std::slice::from_ref(&cluster_init_set),
+                &[],
+            );
+            device.cmd_dispatch(command_buffer, cluster_count, 1, 1);
+        })?;
+        info!(
+            cluster_count,
+            cluster_size = 256,
+            "cluster bounds initialized"
+        );
+
         let cull_uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(cull_uniform.buffer())
             .offset(0)
@@ -619,6 +834,10 @@ impl MeshPass {
                 .buffer(indirect_buffers[index].buffer())
                 .offset(0)
                 .range(indirect_buffers[index].size())];
+            let cluster_flags_info = [vk::DescriptorBufferInfo::default()
+                .buffer(cluster_flags[index].buffer())
+                .offset(0)
+                .range(cluster_flags[index].size())];
             unsafe {
                 device.update_descriptor_sets(
                     &[
@@ -642,6 +861,11 @@ impl MeshPass {
                             .dst_binding(3)
                             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                             .buffer_info(&indirect_info),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(*set)
+                            .dst_binding(4)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&cluster_flags_info),
                     ],
                     &[],
                 );
@@ -809,6 +1033,16 @@ impl MeshPass {
             cull_readback,
             cull_enabled: true,
             count_override: None,
+            cluster_count,
+            _cluster_bounds: cluster_bounds,
+            cluster_flags,
+            cluster_init_pipeline,
+            cluster_cull_pipeline,
+            cluster_layout,
+            cluster_set_layout,
+            cluster_pool,
+            _cluster_init_set: cluster_init_set,
+            cluster_sets,
             uniform_buffer,
             index_count,
             base_count,
@@ -864,7 +1098,8 @@ impl MeshPass {
         let cull_uniform = CullUniform {
             planes,
             count: self.base_count,
-            pad: [0; 3],
+            cluster_count: self.cluster_count,
+            pad: [0; 2],
         };
         self.cull_uniform
             .write(bytemuck::bytes_of(&cull_uniform))
@@ -926,6 +1161,37 @@ impl MeshPass {
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                     .buffer(self.indirect_buffers[index].buffer())
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)],
+                &[],
+            );
+
+            // Cluster pass first: one sphere test per 256 instances publishes
+            // visibility flags that the instance pass consults.
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cluster_cull_pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.cluster_layout,
+                0,
+                std::slice::from_ref(&self.cluster_sets[index]),
+                &[],
+            );
+            device.cmd_dispatch(command_buffer, self.cluster_count.div_ceil(64), 1, 1);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .buffer(self.cluster_flags[index].buffer())
                     .offset(0)
                     .size(vk::WHOLE_SIZE)],
                 &[],
@@ -1111,6 +1377,15 @@ impl Drop for MeshPass {
             self.device.destroy_descriptor_pool(self.cull_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.cull_set_layout, None);
+            self.device
+                .destroy_pipeline(self.cluster_init_pipeline, None);
+            self.device
+                .destroy_pipeline(self.cluster_cull_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.cluster_layout, None);
+            self.device.destroy_descriptor_pool(self.cluster_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.cluster_set_layout, None);
         }
     }
 }

@@ -18,9 +18,8 @@ struct CullUniform {
     // Six world-space planes, xyz = normal, w = distance. Inside: dot(n,p)+w >= 0.
     planes: array<vec4<f32>, 6>,
     count: u32,
-    pad0: u32,
-    pad1: u32,
-    pad2: u32,
+    cluster_count: u32,
+    pad: vec2<u32>,
 };
 
 @group(0) @binding(0) var<uniform> cull: CullUniform;
@@ -29,10 +28,16 @@ struct CullUniform {
 // Same buffer as this image's indirect draw args: [indexCount, instanceCount, ...].
 @group(0) @binding(3) var<storage, read_write> draw_args: array<atomic<u32>>;
 
+@group(0) @binding(4) var<storage, read> cluster_flags: array<u32>;
+
 @compute @workgroup_size(256)
 fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
     if (index >= cull.count) {
+        return;
+    }
+    // Skip whole clusters rejected by the cluster frustum pass.
+    if (cluster_flags[index / 256u] == 0u) {
         return;
     }
 
