@@ -70,6 +70,26 @@ fn sample_ao(uv: vec2<f32>) -> f32 {
     return textureSample(ao_texture, hdr_sampler, uv).r;
 }
 
+const FPS_FONT: array<u32, 50> = array<u32, 50>(
+    7u, 5u, 5u, 5u, 7u,
+    2u, 6u, 2u, 2u, 7u,
+    7u, 1u, 7u, 4u, 7u,
+    7u, 1u, 3u, 1u, 7u,
+    5u, 5u, 7u, 1u, 1u,
+    7u, 4u, 7u, 1u, 7u,
+    7u, 4u, 7u, 5u, 7u,
+    7u, 1u, 1u, 1u, 1u,
+    7u, 5u, 7u, 5u, 7u,
+    7u, 5u, 7u, 1u, 7u
+);
+
+fn glyph_row(digit: u32, row: i32) -> u32 {
+    if (digit > 9u || row < 0 || row > 4) {
+        return 0u;
+    }
+    return FPS_FONT[digit * 5u + u32(row)];
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let hdr = textureSample(hdr_texture, hdr_sampler, input.uv).rgb;
@@ -99,5 +119,44 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let offset = input.uv - vec2<f32>(0.5, 0.5);
     let vignette = 1.0 - 0.35 * dot(offset, offset);
+
+    let fps = bitcast<f32>(debug_params.fps_bits);
+    if (fps > 0.0 && debug_params.mode == 0u) {
+        let fps_int = u32(round(fps));
+        let digits = array<u32, 4>(
+            (fps_int / 1000u) % 10u,
+            (fps_int / 100u) % 10u,
+            (fps_int / 10u) % 10u,
+            fps_int % 10u,
+        );
+        let box_w = 0.06;
+        let box_h = 0.06;
+        let x0 = 1.0 - box_w - 0.015;
+        let y0 = 0.015;
+        if (input.uv.x >= x0 && input.uv.x < x0 + box_w
+            && input.uv.y >= y0 && input.uv.y < y0 + box_h) {
+            let gx = i32((input.uv.x - x0) / (box_w / 16.0));
+            let gy = i32((input.uv.y - y0) / (box_h / 5.0));
+            if (gx >= 0 && gx < 15 && gy >= 0 && gy < 5) {
+                let di = u32(gx / 4);
+                let lx = gx % 4;
+                if (lx < 3) {
+                    var show = true;
+                    switch di {
+                        case 0u: { show = fps_int >= 1000u; }
+                        case 1u: { show = fps_int >= 100u; }
+                        case 2u: { show = fps_int >= 10u; }
+                        default: { show = true; }
+                    }
+                    if (show && ((glyph_row(digits[di], gy) >> (2u - u32(lx))) & 1u) == 1u) {
+                        color = vec3<f32>(1.0, 1.0, 1.0);
+                    } else {
+                        color = color * 0.4;
+                    }
+                }
+            }
+        }
+    }
+
     return vec4<f32>(clamp(color * vignette, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

@@ -22,6 +22,7 @@ struct Sandbox {
     profile_interval: u32,
     no_cache: bool,
     instances: Option<u32>,
+    fps_smoothed: f32,
 }
 
 impl Drop for Sandbox {
@@ -119,7 +120,7 @@ impl PlatformHandler for Sandbox {
                         _ => None,
                     };
                     if let Some(view) = view
-                        && let Some(renderer) = self.renderer.as_ref()
+                        && let Some(renderer) = self.renderer.as_mut()
                     {
                         if let Err(error) = renderer.set_debug_view(view) {
                             error!("failed to set debug view: {error}");
@@ -136,6 +137,20 @@ impl PlatformHandler for Sandbox {
 
     fn on_redraw(&mut self, _window: &Arc<Window>) {
         self.time.tick();
+
+        let delta = self.time.delta_secs();
+        if delta > 0.0 {
+            let instant_fps = 1.0 / delta;
+            self.fps_smoothed = if self.fps_smoothed == 0.0 {
+                instant_fps
+            } else {
+                self.fps_smoothed * 0.9 + instant_fps * 0.1
+            };
+        }
+
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_fps(self.fps_smoothed);
+        }
 
         let seconds = self.time.elapsed_secs() as f32;
         let clear_color = [
@@ -260,6 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             profile_interval,
             no_cache,
             instances,
+            fps_smoothed: 0.0,
         },
     )?;
     Ok(())

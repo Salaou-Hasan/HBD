@@ -19,7 +19,8 @@ const FRAGMENT_ENTRY: &CStr = c"fs_main";
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DebugParams {
     mode: u32,
-    pad: [u32; 3],
+    fps_bits: u32,
+    pad: [u32; 2],
 }
 
 pub(crate) struct TonemapPass {
@@ -31,6 +32,7 @@ pub(crate) struct TonemapPass {
     sampler: vk::Sampler,
     descriptor_sets: Vec<vk::DescriptorSet>,
     debug_buffer: GpuBuffer,
+    mode: u32,
 }
 
 impl TonemapPass {
@@ -194,7 +196,8 @@ impl TonemapPass {
         debug_buffer
             .write(bytemuck::bytes_of(&DebugParams {
                 mode: 0,
-                pad: [0, 0, 0],
+                fps_bits: 0,
+                pad: [0, 0],
             }))
             .map_err(RenderError::Gfx)?;
 
@@ -328,16 +331,27 @@ impl TonemapPass {
             sampler,
             descriptor_sets,
             debug_buffer,
+            mode: 0,
         })
     }
 
-    pub(crate) fn set_mode(&self, mode: u32) -> Result<(), RenderError> {
+    pub(crate) fn set_mode(&mut self, mode: u32) -> Result<(), RenderError> {
+        self.mode = mode;
         self.debug_buffer
             .write(bytemuck::bytes_of(&DebugParams {
                 mode,
-                pad: [0, 0, 0],
+                fps_bits: 0,
+                pad: [0, 0],
             }))
             .map_err(RenderError::Gfx)
+    }
+
+    pub(crate) fn set_fps(&mut self, fps: f32) {
+        let _ = self.debug_buffer.write(bytemuck::bytes_of(&DebugParams {
+            mode: self.mode,
+            fps_bits: fps.to_bits(),
+            pad: [0, 0],
+        }));
     }
 
     pub(crate) fn record(

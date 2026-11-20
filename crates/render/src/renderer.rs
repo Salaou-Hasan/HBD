@@ -460,7 +460,11 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn set_debug_view(&self, view: DebugView) -> Result<(), RenderError> {
+    pub fn set_fps(&mut self, fps: f32) {
+        self.tonemap.set_fps(fps);
+    }
+
+    pub fn set_debug_view(&mut self, view: DebugView) -> Result<(), RenderError> {
         let mode = match view {
             DebugView::Final => 0,
             DebugView::Filmic => 1,
