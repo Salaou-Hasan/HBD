@@ -24,6 +24,8 @@ struct Instance {
 @group(0) @binding(3) var shadow_map1: texture_depth_2d;
 @group(0) @binding(4) var shadow_map2: texture_depth_2d;
 @group(0) @binding(5) var shadow_sampler: sampler_comparison;
+@group(0) @binding(6) var material_textures: texture_2d_array<f32>;
+@group(0) @binding(7) var material_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -130,7 +132,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let metallic = input.material.x;
     let roughness = clamp(input.material.y, 0.05, 1.0);
     let ao = input.material.z;
-    let albedo = input.base_color;
+    // Bindless material: instance material.w selects a texture array layer.
+    let material_layer = min(u32(input.material.w), 3u);
+    let texel = textureSample(
+        material_textures,
+        material_sampler,
+        input.world_position.xz * 0.5,
+        material_layer,
+    );
+    let albedo = input.base_color * texel.rgb;
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     let n_dot_v = max(dot(normal, view), 0.0001);

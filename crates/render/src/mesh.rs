@@ -131,6 +131,9 @@ pub(crate) struct MeshPass {
     _cluster_init_set: vk::DescriptorSet,
     cluster_sets: Vec<vk::DescriptorSet>,
     /// HZB: max-depth mip chain rebuilt from the previous frame's depth.
+    _material_image: GpuImage,
+    _material_view: vk::ImageView,
+    _material_sampler: vk::Sampler,
     hzb_image: GpuImage,
     _hzb_storage_views: Vec<vk::ImageView>,
     _hzb_sampled_view: vk::ImageView,
@@ -204,6 +207,16 @@ impl MeshPass {
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(7)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -1201,6 +1214,9 @@ impl MeshPass {
             }
         }
 
+        let (material_image, material_view, material_sampler) =
+            Self::create_material_table(context)?;
+
         let cull_uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(cull_uniform.buffer())
             .offset(0)
@@ -1269,10 +1285,10 @@ impl MeshPass {
                 .descriptor_count(image_count + 1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(3 * (image_count + 1)),
+                .descriptor_count(4 * (image_count + 1)),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(image_count + 1),
+                .descriptor_count(2 * (image_count + 1)),
         ];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
@@ -1308,6 +1324,10 @@ impl MeshPass {
             })
             .collect();
         let shadow_sampler_info = [vk::DescriptorImageInfo::default().sampler(shadow_sampler)];
+        let material_image_info = [vk::DescriptorImageInfo::default()
+            .image_view(material_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let material_sampler_info = [vk::DescriptorImageInfo::default().sampler(material_sampler)];
         let uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(uniform_buffer.buffer())
             .offset(0)
@@ -1349,6 +1369,16 @@ impl MeshPass {
                     .dst_binding(5)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .image_info(&shadow_sampler_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(6)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&material_image_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(7)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&material_sampler_info),
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
@@ -1383,6 +1413,16 @@ impl MeshPass {
                 .dst_binding(5)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .image_info(&shadow_sampler_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(graphics_set_no_cull)
+                .dst_binding(6)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&material_image_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(graphics_set_no_cull)
+                .dst_binding(7)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&material_sampler_info),
         ];
         unsafe { device.update_descriptor_sets(&no_cull_writes, &[]) };
 
@@ -1427,6 +1467,9 @@ impl MeshPass {
             cluster_pool,
             _cluster_init_set: cluster_init_set,
             cluster_sets,
+            _material_image: material_image,
+            _material_view: material_view,
+            _material_sampler: material_sampler,
             hzb_image,
             _hzb_storage_views: hzb_storage_views,
             _hzb_sampled_view: sampled_view,
@@ -1996,7 +2039,7 @@ pub(crate) fn build_scene() -> Vec<Instance> {
             instances.push(Instance {
                 model: model.to_cols_array_2d(),
                 base_color: [color[0], color[1], color[2], 1.0],
-                material: [metallic, roughness, 1.0, 0.0],
+                material: [metallic, roughness, 1.0, (x + z).rem_euclid(4) as f32],
             });
         }
     }
@@ -2127,6 +2170,182 @@ pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance),
     };
 
     Ok((vertices, indices, instance))
+}
+
+impl MeshPass {
+    fn create_material_table(
+        context: &VulkanContext,
+    ) -> Result<(GpuImage, vk::ImageView, vk::Sampler), RenderError> {
+        let device = context.device().clone();
+        // --- Bindless material table (4 texture layers) -------------------
+        const MATERIAL_LAYERS: u32 = 4;
+        const MATERIAL_SIZE: u32 = 4;
+        let material_image = context.create_image(
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .extent(vk::Extent3D {
+                    width: MATERIAL_SIZE,
+                    height: MATERIAL_SIZE,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(MATERIAL_LAYERS)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            "HBD material table",
+        )?;
+        // Four simple patterns so the per-instance layer index is visible.
+        let mut material_pixels =
+            Vec::with_capacity((MATERIAL_SIZE * MATERIAL_SIZE * MATERIAL_LAYERS * 4) as usize);
+        for layer in 0..MATERIAL_LAYERS {
+            for y in 0..MATERIAL_SIZE {
+                for x in 0..MATERIAL_SIZE {
+                    let checker = (x + y) % 2 == 0;
+                    let stripe = x < 2;
+                    let dot = x == 1 && y == 1;
+                    let shade = match layer {
+                        0 => {
+                            if checker {
+                                255
+                            } else {
+                                170
+                            }
+                        }
+                        1 => {
+                            if stripe {
+                                255
+                            } else {
+                                110
+                            }
+                        }
+                        2 => {
+                            if dot {
+                                255
+                            } else {
+                                140
+                            }
+                        }
+                        _ => 120 + x * 32 + y * 8,
+                    } as u8;
+                    material_pixels.extend_from_slice(&[shade, shade, shade, 255]);
+                }
+            }
+        }
+        let material_staging = context.create_buffer(
+            material_pixels.len() as u64,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            MemoryLocation::CpuToGpu,
+            "HBD material staging",
+        )?;
+        material_staging
+            .write(&material_pixels)
+            .map_err(RenderError::Gfx)?;
+        context.one_time_commands(|device, command_buffer| unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(material_image.image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(MATERIAL_LAYERS),
+                    )],
+            );
+            device.cmd_copy_buffer_to_image(
+                command_buffer,
+                material_staging.buffer(),
+                material_image.image(),
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(MATERIAL_LAYERS),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: MATERIAL_SIZE,
+                        height: MATERIAL_SIZE,
+                        depth: 1,
+                    })],
+            );
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(material_image.image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(MATERIAL_LAYERS),
+                    )],
+            );
+        })?;
+        let material_view = unsafe {
+            device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(material_image.image())
+                    .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
+                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(1)
+                            .base_array_layer(0)
+                            .layer_count(MATERIAL_LAYERS),
+                    ),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let material_sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_v(vk::SamplerAddressMode::REPEAT),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        info!(layers = MATERIAL_LAYERS, "bindless material table ready");
+        Ok((material_image, material_view, material_sampler))
+    }
 }
 
 #[cfg(test)]

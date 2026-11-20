@@ -11,6 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 #[derive(Debug, Error)]
@@ -59,7 +60,9 @@ pub fn run<H>(config: WindowConfig, handler: H) -> Result<(), PlatformError>
 where
     H: PlatformHandler + 'static,
 {
-    let event_loop = EventLoop::new()?;
+    // The sandbox runs the loop on a large-stack worker thread so the GPU
+    // setup's descriptor arrays cannot overflow the 1 MB default stack.
+    let event_loop = EventLoop::builder().with_any_thread(true).build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = PlatformApp {

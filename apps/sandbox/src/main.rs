@@ -340,24 +340,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ecs_scene.world().spawn((EcsLight::default(),));
     info!(?camera_entity, "ECS camera and light entities spawned");
 
-    platform::run(
-        config,
-        Sandbox {
-            time: Time::new(),
-            renderer: None,
-            ecs_scene,
-            camera_entity,
-            static_camera,
-            obj_path,
-            profile,
-            profile_path,
-            profile_interval,
-            no_cache,
-            no_cull,
-            cull_stats,
-            instances,
-            fps_smoothed: 0.0,
-        },
-    )?;
+    // The GPU setup builds several large descriptor arrays; give it a bigger
+    // stack than the 1 MB default so naga and Vulkan setup do not overflow.
+    info!("starting renderer on a 16 MB worker stack");
+    let runner = std::thread::Builder::new()
+        .name("hbd-main".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            platform::run(
+                config,
+                Sandbox {
+                    time: Time::new(),
+                    renderer: None,
+                    ecs_scene,
+                    camera_entity,
+                    static_camera,
+                    obj_path,
+                    profile,
+                    profile_path,
+                    profile_interval,
+                    no_cache,
+                    no_cull,
+                    cull_stats,
+                    instances,
+                    fps_smoothed: 0.0,
+                },
+            )
+        })
+        .map_err(|error| format!("failed to spawn main thread: {error}"))?;
+    runner
+        .join()
+        .map_err(|_| "hbd-main thread panicked".to_owned())??;
     Ok(())
 }
