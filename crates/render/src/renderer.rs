@@ -188,12 +188,17 @@ impl Renderer {
         info!(enabled, "GPU frustum culling explicitly toggled");
     }
 
-    /// Explicit, stalled readback of the last culled instance count.
-    pub fn cull_counts(&self) -> Result<(u32, u32), RenderError> {
+    /// Explicit, stalled readback of the last culled count. Returns
+    /// (visible instances, total instances, triangles per instance).
+    pub fn cull_counts(&self) -> Result<(u32, u32, u32), RenderError> {
         let visible = self
             .mesh
             .read_visible_count(&self.context, self.last_image_index)?;
-        Ok((visible, self.mesh.total_count()))
+        Ok((
+            visible,
+            self.mesh.total_count(),
+            self.mesh.triangles_per_instance(),
+        ))
     }
 
     /// Explicit presentation-path switch. Mirrors `RendererConfig::hdr`.

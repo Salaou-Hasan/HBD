@@ -893,6 +893,10 @@ impl MeshPass {
         self.base_count
     }
 
+    pub(crate) fn triangles_per_instance(&self) -> u32 {
+        self.index_count / 3
+    }
+
     /// Dispatches culling for one swapchain image. Both the compacted instance
     /// buffer and the indirect draw args are per-image, so no other in-flight
     /// frame can read them while this one writes.

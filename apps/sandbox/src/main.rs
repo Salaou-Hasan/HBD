@@ -231,10 +231,17 @@ impl PlatformHandler for Sandbox {
                 && let Some(renderer) = self.renderer.as_ref()
             {
                 match renderer.cull_counts() {
-                    Ok((visible, total)) => info!(
-                        frame = self.time.frame(),
-                        visible, total, "GPU cull stats (explicit readback)"
-                    ),
+                    Ok((visible, total, tris_per_instance)) => {
+                        let visible_triangles = u64::from(visible) * u64::from(tris_per_instance);
+                        info!(
+                            frame = self.time.frame(),
+                            visible,
+                            total,
+                            visible_triangles,
+                            target_10m_met = visible_triangles >= 10_000_000,
+                            "GPU cull stats (explicit readback)"
+                        );
+                    }
                     Err(error) => error!(%error, "GPU cull stats readback failed"),
                 }
             }
