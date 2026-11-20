@@ -122,6 +122,8 @@ impl Renderer {
             obj_path.as_deref(),
             instance_count,
             image_count as u32,
+            targets.depth_views(),
+            extent,
         )?;
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
@@ -316,6 +318,8 @@ impl Renderer {
             obj_path.as_deref(),
             *instance_count,
             image_count as u32,
+            new_targets.depth_views(),
+            extent,
         )?;
         let new_taa = TaaPass::new(
             context,
@@ -481,7 +485,7 @@ impl Renderer {
                         }
                         // Per-image cull: compacted instances and the indirect
                         // count are private to this swapchain image.
-                        mesh.dispatch_cull(command_buffer, image_index);
+                        mesh.dispatch_cull(command_buffer, image_index, view_projection);
                         shadow.record(command_buffer);
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {

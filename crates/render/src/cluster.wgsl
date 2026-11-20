@@ -27,11 +27,41 @@ struct CullUniform {
 // One flag per cluster, written once per frame and read by cull.wgsl.
 @group(0) @binding(3) var<storage, read_write> flags: array<u32>;
 
+struct Occlusion {
+    view_projection: mat4x4<f32>,
+    proj_scale: vec2<f32>,
+    screen: vec2<f32>,
+    mip_count: u32,
+    enabled: u32,
+    pad: vec2<u32>,
+};
+@group(0) @binding(4) var<uniform> occlusion: Occlusion;
+@group(0) @binding(5) var hzb: texture_2d<f32>;
+
 fn inside_frustum(center: vec3<f32>, radius: f32) -> bool {
     for (var i = 0u; i < 6u; i = i + 1u) {
         let plane = cull.planes[i];
         if (dot(plane.xyz, center) + plane.w < -radius) {
             return false;
+        }
+    }
+    // Conservative HZB rejection: only when the whole cluster is behind the
+    // closest previously-rendered depth at the coarsest representative texel.
+    if (occlusion.enabled != 0u) {
+        let clip = occlusion.view_projection * vec4<f32>(center, 1.0);
+        if (clip.w > 0.0) {
+            let ndc = clip.xyz / clip.w;
+            let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+                let radius_px = radius * min(occlusion.proj_scale.x, occlusion.proj_scale.y) / clip.w;
+                let mip = min(u32(max(0.0, log2(max(radius_px, 1.0)))), occlusion.mip_count - 1u);
+                let texel = vec2<i32>(clamp(uv * vec2<f32>(textureDimensions(hzb, i32(mip))), vec2<f32>(0.0), vec2<f32>(textureDimensions(hzb, i32(mip))) - vec2<f32>(1.0)));
+                let max_depth = textureLoad(hzb, texel, i32(mip)).r;
+                let near_depth = ndc.z - radius / max(clip.w, 0.001);
+                if (max_depth < near_depth) {
+                    return false;
+                }
+            }
         }
     }
     return true;

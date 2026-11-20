@@ -12,7 +12,7 @@ use std::path::Path;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use hbd_core::math::{Mat4, Vec2, Vec3};
-use hbd_gfx::{GfxError, GpuBuffer, MemoryLocation, VulkanContext};
+use hbd_gfx::{GfxError, GpuBuffer, GpuImage, MemoryLocation, VulkanContext};
 use tracing::info;
 
 use crate::{Camera, DirectionalLight, RenderError, shader};
@@ -22,6 +22,8 @@ const SKY_WGSL: &str = include_str!("sky.wgsl");
 const MESH_GENERATE_WGSL: &str = include_str!("mesh_generate.wgsl");
 const CULL_WGSL: &str = include_str!("cull.wgsl");
 const CLUSTER_WGSL: &str = include_str!("cluster.wgsl");
+const HZB_WGSL: &str = include_str!("hzb.wgsl");
+const HZB_MIPS: u32 = 3;
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const GRID_HALF_EXTENT: i32 = 4;
@@ -66,6 +68,26 @@ struct CullUniform {
     pad: [u32; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Occlusion {
+    view_projection: [[f32; 4]; 4],
+    proj_scale: [f32; 2],
+    screen: [f32; 2],
+    mip_count: u32,
+    enabled: u32,
+    pad: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct HzbLevel {
+    src_mip: u32,
+    src_width: u32,
+    src_height: u32,
+    pad: u32,
+}
+
 pub(crate) struct MeshPass {
     device: ash::Device,
     pipeline: vk::Pipeline,
@@ -108,6 +130,20 @@ pub(crate) struct MeshPass {
     cluster_pool: vk::DescriptorPool,
     _cluster_init_set: vk::DescriptorSet,
     cluster_sets: Vec<vk::DescriptorSet>,
+    /// HZB: max-depth mip chain rebuilt from the previous frame's depth.
+    hzb_image: GpuImage,
+    _hzb_storage_views: Vec<vk::ImageView>,
+    _hzb_sampled_view: vk::ImageView,
+    hzb_from_depth_pipeline: vk::Pipeline,
+    hzb_reduce_pipeline: vk::Pipeline,
+    hzb_layout: vk::PipelineLayout,
+    hzb_set_layout: vk::DescriptorSetLayout,
+    hzb_pool: vk::DescriptorPool,
+    hzb_sets: Vec<Vec<vk::DescriptorSet>>,
+    _hzb_uniforms: Vec<GpuBuffer>,
+    occlusion_uniforms: Vec<GpuBuffer>,
+    hzb_width: u32,
+    hzb_height: u32,
     uniform_buffer: GpuBuffer,
     index_count: u32,
     base_count: u32,
@@ -119,6 +155,7 @@ pub(crate) struct MeshPass {
 }
 
 impl MeshPass {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: &VulkanContext,
         render_pass: vk::RenderPass,
@@ -127,6 +164,8 @@ impl MeshPass {
         obj_path: Option<&Path>,
         instance_count: Option<u32>,
         image_count: u32,
+        depth_views: &[vk::ImageView],
+        extent: vk::Extent2D,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
         assert_eq!(shadow_views.len(), 3, "CSM requires three shadow views");
@@ -664,6 +703,16 @@ impl MeshPass {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(4)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let cluster_set_layout = unsafe {
             device.create_descriptor_set_layout(
@@ -719,6 +768,9 @@ impl MeshPass {
                         vk::DescriptorPoolSize::default()
                             .ty(vk::DescriptorType::STORAGE_BUFFER)
                             .descriptor_count(4 * (image_count + 1)),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                            .descriptor_count(image_count + 1),
                     ])
                     .max_sets(image_count + 1),
                 None,
@@ -758,42 +810,69 @@ impl MeshPass {
             .buffer(cluster_bounds.buffer())
             .offset(0)
             .range(cluster_bounds.size())];
-        let write_cluster_set = |set: vk::DescriptorSet, flags: &GpuBuffer| {
-            let flags_info = [vk::DescriptorBufferInfo::default()
-                .buffer(flags.buffer())
-                .offset(0)
-                .range(flags.size())];
-            unsafe {
-                device.update_descriptor_sets(
-                    &[
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(0)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&source_info),
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(1)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&bounds_info),
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(2)
-                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                            .buffer_info(&cull_uniform_info),
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(set)
-                            .dst_binding(3)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&flags_info),
-                    ],
-                    &[],
-                );
-            }
-        };
-        write_cluster_set(cluster_init_set, &cluster_flags[0]);
+        let mut occlusion_uniforms = Vec::with_capacity(image_count as usize);
+        for _ in 0..image_count {
+            occlusion_uniforms.push(context.create_buffer(
+                size_of::<Occlusion>() as u64,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                MemoryLocation::CpuToGpu,
+                "HBD occlusion params",
+            )?);
+        }
+        let write_cluster_set =
+            |set: vk::DescriptorSet, flags: &GpuBuffer, occlusion: &GpuBuffer| {
+                let flags_info = [vk::DescriptorBufferInfo::default()
+                    .buffer(flags.buffer())
+                    .offset(0)
+                    .range(flags.size())];
+                let occlusion_info = [vk::DescriptorBufferInfo::default()
+                    .buffer(occlusion.buffer())
+                    .offset(0)
+                    .range(occlusion.size())];
+                let hzb_sampled_info = [vk::DescriptorImageInfo::default()
+                    .image_view(depth_views[0])
+                    .image_layout(vk::ImageLayout::GENERAL)];
+                unsafe {
+                    device.update_descriptor_sets(
+                        &[
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(0)
+                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                                .buffer_info(&source_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(1)
+                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                                .buffer_info(&bounds_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(2)
+                                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                                .buffer_info(&cull_uniform_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(3)
+                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                                .buffer_info(&flags_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(4)
+                                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                                .buffer_info(&occlusion_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(5)
+                                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                                .image_info(&hzb_sampled_info),
+                        ],
+                        &[],
+                    );
+                }
+            };
+        write_cluster_set(cluster_init_set, &cluster_flags[0], &occlusion_uniforms[0]);
         for (index, set) in cluster_sets.iter().enumerate() {
-            write_cluster_set(*set, &cluster_flags[index]);
+            write_cluster_set(*set, &cluster_flags[index], &occlusion_uniforms[index]);
         }
         context.one_time_commands(|device, command_buffer| unsafe {
             device.cmd_bind_pipeline(
@@ -816,6 +895,311 @@ impl MeshPass {
             cluster_size = 256,
             "cluster bounds initialized"
         );
+
+        // --- HZB (max-depth mip chain) ------------------------------------
+        let hzb_width = (extent.width / 2).max(1);
+        let hzb_height = (extent.height / 2).max(1);
+        let hzb_image = context.create_image(
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::R32_SFLOAT)
+                .extent(vk::Extent3D {
+                    width: hzb_width,
+                    height: hzb_height,
+                    depth: 1,
+                })
+                .mip_levels(HZB_MIPS)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            "HBD HZB",
+        )?;
+        let sampled_view = unsafe {
+            device.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(hzb_image.image())
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(vk::Format::R32_SFLOAT)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(HZB_MIPS)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    ),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let mut hzb_storage_views = Vec::with_capacity(HZB_MIPS as usize);
+        for mip in 0..HZB_MIPS {
+            hzb_storage_views.push(
+                unsafe {
+                    device.create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(hzb_image.image())
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(vk::Format::R32_SFLOAT)
+                            .subresource_range(
+                                vk::ImageSubresourceRange::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .base_mip_level(mip)
+                                    .level_count(1)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            ),
+                        None,
+                    )
+                }
+                .map_err(GfxError::Vulkan)?,
+            );
+        }
+        context.one_time_commands(|device, command_buffer| unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(hzb_image.image())
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .base_mip_level(0)
+                            .level_count(HZB_MIPS)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )],
+            );
+        })?;
+
+        let hzb_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(3)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let hzb_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&hzb_bindings),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let hzb_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[hzb_set_layout]),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let hzb_sampler = unsafe {
+            device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::NEAREST)
+                    .min_filter(vk::Filter::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let make_hzb_pipeline = |entry: &std::ffi::CStr, module: vk::ShaderModule| {
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(entry);
+            let info = vk::ComputePipelineCreateInfo::default()
+                .layout(hzb_layout)
+                .stage(stage);
+            unsafe {
+                device
+                    .create_compute_pipelines(
+                        vk::PipelineCache::null(),
+                        std::slice::from_ref(&info),
+                        None,
+                    )
+                    .map_err(|(_, error)| RenderError::Pipeline(error))?
+                    .into_iter()
+                    .next()
+                    .ok_or(RenderError::MissingPipeline)
+            }
+        };
+        let from_depth_spv =
+            shader::compile_wgsl(HZB_WGSL, "from_depth_cs", naga::ShaderStage::Compute)?;
+        let reduce_spv = shader::compile_wgsl(HZB_WGSL, "reduce_cs", naga::ShaderStage::Compute)?;
+        let from_depth_module = create_shader_module(&device, &from_depth_spv)?;
+        let reduce_module = create_shader_module(&device, &reduce_spv)?;
+        let hzb_from_depth_pipeline = make_hzb_pipeline(c"from_depth_cs", from_depth_module)?;
+        let hzb_reduce_pipeline = make_hzb_pipeline(c"reduce_cs", reduce_module)?;
+        unsafe {
+            device.destroy_shader_module(from_depth_module, None);
+            device.destroy_shader_module(reduce_module, None);
+        }
+
+        let total_sets = image_count * HZB_MIPS;
+        let hzb_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .descriptor_count(total_sets),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                            .descriptor_count(total_sets),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_IMAGE)
+                            .descriptor_count(total_sets),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_count(total_sets),
+                    ])
+                    .max_sets(total_sets),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let hzb_layouts = vec![hzb_set_layout; total_sets as usize];
+        let hzb_allocated = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(hzb_pool)
+                    .set_layouts(&hzb_layouts),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+
+        let mut hzb_uniforms = Vec::with_capacity(total_sets as usize);
+        let mut hzb_sets = Vec::with_capacity(image_count as usize);
+        for image in 0..image_count {
+            let mut per_image = Vec::with_capacity(HZB_MIPS as usize);
+            for mip in 0..HZB_MIPS {
+                let set = hzb_allocated[(image * HZB_MIPS + mip) as usize];
+                let src_mip = mip.saturating_sub(1);
+                let src_width = if mip == 0 {
+                    extent.width
+                } else {
+                    (hzb_width >> src_mip).max(1)
+                };
+                let src_height = if mip == 0 {
+                    extent.height
+                } else {
+                    (hzb_height >> src_mip).max(1)
+                };
+                let uniform = context.create_buffer(
+                    size_of::<HzbLevel>() as u64,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    MemoryLocation::CpuToGpu,
+                    "HBD HZB level",
+                )?;
+                uniform
+                    .write(bytemuck::bytes_of(&HzbLevel {
+                        src_mip,
+                        src_width,
+                        src_height,
+                        pad: 0,
+                    }))
+                    .map_err(RenderError::Gfx)?;
+                let depth_info = [vk::DescriptorImageInfo::default()
+                    .sampler(hzb_sampler)
+                    .image_view(depth_views[image as usize])
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                let hzb_sampled_info = [vk::DescriptorImageInfo::default()
+                    .image_view(sampled_view)
+                    .image_layout(vk::ImageLayout::GENERAL)];
+                let output_info = [vk::DescriptorImageInfo::default()
+                    .image_view(hzb_storage_views[mip as usize])
+                    .image_layout(vk::ImageLayout::GENERAL)];
+                let uniform_info = [vk::DescriptorBufferInfo::default()
+                    .buffer(uniform.buffer())
+                    .offset(0)
+                    .range(uniform.size())];
+                unsafe {
+                    device.update_descriptor_sets(
+                        &[
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(0)
+                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                                .image_info(&depth_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(1)
+                                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                                .image_info(&hzb_sampled_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(2)
+                                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                                .image_info(&output_info),
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(set)
+                                .dst_binding(3)
+                                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                                .buffer_info(&uniform_info),
+                        ],
+                        &[],
+                    );
+                }
+                hzb_uniforms.push(uniform);
+                per_image.push(set);
+            }
+            hzb_sets.push(per_image);
+        }
+        info!(
+            hzb_width,
+            hzb_height,
+            mips = HZB_MIPS,
+            "HZB occlusion chain initialized"
+        );
+        let hzb_bind = [vk::DescriptorImageInfo::default()
+            .image_view(sampled_view)
+            .image_layout(vk::ImageLayout::GENERAL)];
+        for set in cluster_sets
+            .iter()
+            .copied()
+            .chain(std::iter::once(cluster_init_set))
+        {
+            unsafe {
+                device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(5)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&hzb_bind)],
+                    &[],
+                );
+            }
+        }
 
         let cull_uniform_info = [vk::DescriptorBufferInfo::default()
             .buffer(cull_uniform.buffer())
@@ -1043,6 +1427,19 @@ impl MeshPass {
             cluster_pool,
             _cluster_init_set: cluster_init_set,
             cluster_sets,
+            hzb_image,
+            _hzb_storage_views: hzb_storage_views,
+            _hzb_sampled_view: sampled_view,
+            hzb_from_depth_pipeline,
+            hzb_reduce_pipeline,
+            hzb_layout,
+            hzb_set_layout,
+            hzb_pool,
+            hzb_sets,
+            _hzb_uniforms: hzb_uniforms,
+            occlusion_uniforms,
+            hzb_width,
+            hzb_height,
             uniform_buffer,
             index_count,
             base_count,
@@ -1135,12 +1532,35 @@ impl MeshPass {
     /// Dispatches culling for one swapchain image. Both the compacted instance
     /// buffer and the indirect draw args are per-image, so no other in-flight
     /// frame can read them while this one writes.
-    pub(crate) fn dispatch_cull(&self, command_buffer: vk::CommandBuffer, image_index: u32) {
+    pub(crate) fn dispatch_cull(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        image_index: u32,
+        view_projection: hbd_core::math::Mat4,
+    ) {
         if !self.cull_enabled {
             return;
         }
         let index = image_index as usize;
         let device = &self.device;
+        let aspect = self.hzb_width as f32 / self.hzb_height.max(1) as f32;
+        let projection = view_projection;
+        let occlusion = Occlusion {
+            view_projection: projection.to_cols_array_2d(),
+            proj_scale: [
+                projection.col(0).x * self.hzb_width as f32,
+                projection.col(1).y * self.hzb_height as f32,
+            ],
+            screen: [self.hzb_width as f32 * 2.0, self.hzb_height as f32 * 2.0],
+            mip_count: HZB_MIPS,
+            enabled: 1,
+            pad: [0; 2],
+        };
+        let _ = aspect;
+        self.occlusion_uniforms[index]
+            .write(bytemuck::bytes_of(&occlusion))
+            .map_err(RenderError::Gfx)
+            .ok();
         unsafe {
             // Reset the atomic instanceCount as a transfer op, then make it
             // visible to the compute shader before it atomically increments.
@@ -1165,6 +1585,55 @@ impl MeshPass {
                     .size(vk::WHOLE_SIZE)],
                 &[],
             );
+
+            // Rebuild the HZB from this image's previous-frame depth, then
+            // reduce 2x2 max into each coarser mip.
+            for mip in 0..HZB_MIPS {
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    if mip == 0 {
+                        self.hzb_from_depth_pipeline
+                    } else {
+                        self.hzb_reduce_pipeline
+                    },
+                );
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.hzb_layout,
+                    0,
+                    std::slice::from_ref(&self.hzb_sets[index][mip as usize]),
+                    &[],
+                );
+                let width = (self.hzb_width >> mip).max(1);
+                let height = (self.hzb_height >> mip).max(1);
+                device.cmd_dispatch(command_buffer, width.div_ceil(8), height.div_ceil(8), 1);
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[vk::ImageMemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .old_layout(vk::ImageLayout::GENERAL)
+                        .new_layout(vk::ImageLayout::GENERAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(self.hzb_image.image())
+                        .subresource_range(
+                            vk::ImageSubresourceRange::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .base_mip_level(mip)
+                                .level_count(1)
+                                .base_array_layer(0)
+                                .layer_count(1),
+                        )],
+                );
+            }
 
             // Cluster pass first: one sphere test per 256 instances publishes
             // visibility flags that the instance pass consults.
@@ -1386,6 +1855,13 @@ impl Drop for MeshPass {
             self.device.destroy_descriptor_pool(self.cluster_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.cluster_set_layout, None);
+            self.device
+                .destroy_pipeline(self.hzb_from_depth_pipeline, None);
+            self.device.destroy_pipeline(self.hzb_reduce_pipeline, None);
+            self.device.destroy_pipeline_layout(self.hzb_layout, None);
+            self.device.destroy_descriptor_pool(self.hzb_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.hzb_set_layout, None);
         }
     }
 }
