@@ -7,9 +7,9 @@ struct DebugParams {
     // 0: AgX final, 1: filmic, 2: HDR, 3: bloom, 4: AO,
     // 5: depth, 6: shadow cascade, 7: TAA history
     mode: u32,
+    fps_bits: u32,
     pad0: u32,
     pad1: u32,
-    pad2: u32,
 };
 @group(0) @binding(4) var<uniform> debug_params: DebugParams;
 @group(0) @binding(5) var depth_texture: texture_depth_2d;
