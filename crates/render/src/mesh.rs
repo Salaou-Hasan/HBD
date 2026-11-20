@@ -19,6 +19,7 @@ use crate::{Camera, DirectionalLight, RenderError, shader};
 
 const MESH_WGSL: &str = include_str!("mesh.wgsl");
 const SKY_WGSL: &str = include_str!("sky.wgsl");
+const MESH_GENERATE_WGSL: &str = include_str!("mesh_generate.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const GRID_HALF_EXTENT: i32 = 4;
@@ -71,6 +72,11 @@ pub(crate) struct MeshPass {
     uniform_buffer: GpuBuffer,
     index_count: u32,
     base_count: u32,
+    /// GPU bowl generator, present only for the explicit `--instances` stress mode.
+    generate_pipeline: Option<vk::Pipeline>,
+    generate_layout: Option<vk::PipelineLayout>,
+    generate_set_layout: Option<vk::DescriptorSetLayout>,
+    generate_pool: Option<vk::DescriptorPool>,
 }
 
 impl MeshPass {
@@ -80,6 +86,7 @@ impl MeshPass {
         shadow_views: &[vk::ImageView],
         shadow_sampler: vk::Sampler,
         obj_path: Option<&Path>,
+        instance_count: Option<u32>,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
         assert_eq!(shadow_views.len(), 3, "CSM requires three shadow views");
@@ -294,13 +301,138 @@ impl MeshPass {
             bytemuck::cast_slice(&indices),
             "HBD index buffer",
         )?;
-        let instance_buffer = context.upload_buffer(
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            bytemuck::cast_slice(&instances),
-            "HBD instance buffer",
-        )?;
         let index_count = indices.len() as u32;
-        let base_count = instances.len() as u32;
+        let (instance_buffer, generated, base_count, instance_source) = if let Some(count) =
+            instance_count
+        {
+            if count == 0 {
+                return Err(RenderError::Obj(
+                    "--instances must be greater than zero".to_owned(),
+                ));
+            }
+            // Device-local storage buffer large enough for the generated
+            // bowl. The compute pass fills it once at construction.
+            let buffer = context.create_buffer(
+                u64::from(count) * size_of::<Instance>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::GpuOnly,
+                "HBD generated instance buffer",
+            )?;
+
+            let generate_spv =
+                shader::compile_wgsl(MESH_GENERATE_WGSL, "cs_main", naga::ShaderStage::Compute)?;
+            let generate_module = create_shader_module(&device, &generate_spv)?;
+            let generate_bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+            let generate_set_layout = unsafe {
+                device.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&generate_bindings),
+                    None,
+                )
+            }
+            .map_err(GfxError::Vulkan)?;
+            let generate_layout = unsafe {
+                device.create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .set_layouts(std::slice::from_ref(&generate_set_layout)),
+                    None,
+                )
+            }
+            .map_err(GfxError::Vulkan)?;
+            let generate_stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(generate_module)
+                .name(c"cs_main");
+            let generate_info = vk::ComputePipelineCreateInfo::default()
+                .layout(generate_layout)
+                .stage(generate_stage);
+            let generate_pipeline = unsafe {
+                device.create_compute_pipelines(
+                    vk::PipelineCache::null(),
+                    std::slice::from_ref(&generate_info),
+                    None,
+                )
+            }
+            .map_err(|(_, error)| RenderError::Pipeline(error))?
+            .into_iter()
+            .next()
+            .ok_or(RenderError::MissingPipeline)?;
+            unsafe { device.destroy_shader_module(generate_module, None) };
+
+            let generate_pool = unsafe {
+                device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .pool_sizes(&[vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_BUFFER)
+                            .descriptor_count(1)])
+                        .max_sets(1),
+                    None,
+                )
+            }
+            .map_err(GfxError::Vulkan)?;
+            let generate_set = unsafe {
+                device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(generate_pool)
+                        .set_layouts(std::slice::from_ref(&generate_set_layout)),
+                )
+            }
+            .map_err(GfxError::Vulkan)?[0];
+            let generated_info = [vk::DescriptorBufferInfo::default()
+                .buffer(buffer.buffer())
+                .offset(0)
+                .range(buffer.size())];
+            unsafe {
+                device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(generate_set)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&generated_info)],
+                    &[],
+                );
+            }
+            let workgroups = count.div_ceil(256);
+            context.one_time_commands(|device, command_buffer| unsafe {
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    generate_pipeline,
+                );
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    generate_layout,
+                    0,
+                    std::slice::from_ref(&generate_set),
+                    &[],
+                );
+                device.cmd_dispatch(command_buffer, workgroups, 1, 1);
+            })?;
+            info!(count, workgroups, "GPU bowl instance generation dispatched");
+            (
+                buffer,
+                Some((
+                    generate_pipeline,
+                    generate_layout,
+                    generate_set_layout,
+                    generate_pool,
+                )),
+                count,
+                "GPU bowl generator",
+            )
+        } else {
+            let buffer = context.upload_buffer(
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                bytemuck::cast_slice(&instances),
+                "HBD instance buffer",
+            )?;
+            let count = instances.len() as u32;
+            (buffer, None, count, source)
+        };
         let draw = [index_count, base_count, 0u32, 0u32, 0u32];
         let indirect_buffer = context.create_buffer(
             size_of::<[u32; 5]>() as u64,
@@ -403,9 +535,9 @@ impl MeshPass {
         }
 
         info!(
-            instances = instances.len(),
+            instances = base_count,
             triangles = indices.len() / 3,
-            source,
+            source = instance_source,
             "mesh pipeline ready"
         );
 
@@ -424,6 +556,10 @@ impl MeshPass {
             uniform_buffer,
             index_count,
             base_count,
+            generate_pipeline: generated.as_ref().map(|g| g.0),
+            generate_layout: generated.as_ref().map(|g| g.1),
+            generate_set_layout: generated.as_ref().map(|g| g.2),
+            generate_pool: generated.as_ref().map(|g| g.3),
         })
     }
 
@@ -550,6 +686,18 @@ impl Drop for MeshPass {
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            if let Some(pipeline) = self.generate_pipeline {
+                self.device.destroy_pipeline(pipeline, None);
+            }
+            if let Some(layout) = self.generate_layout {
+                self.device.destroy_pipeline_layout(layout, None);
+            }
+            if let Some(pool) = self.generate_pool {
+                self.device.destroy_descriptor_pool(pool, None);
+            }
+            if let Some(layout) = self.generate_set_layout {
+                self.device.destroy_descriptor_set_layout(layout, None);
+            }
         }
     }
 }

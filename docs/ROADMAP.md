@@ -66,7 +66,7 @@ Remaining M2 work: GPU-driven indirect/multi-draw scale-up (1M items), 10M+ visi
 
 **Motion-vector attempt (reverted):** a velocity attachment and HBTR velocity transform were implemented but produced corrupted imagery even with AA disabled, so the whole attempt was reverted to the last clean commit. No half-working code is left in the tree.
 
-**Instance-count stress mode:** `--instances N` overrides the indirect instance count. Counts above the 82 source cubes repeat that source set modulo its count; this is an explicit GPU-throughput stress mode, not a scene of unique objects, and is logged as an override. It ran 100,000 instances on the Intel dev GPU without errors.
+**Instance-count stress mode:** `--instances N` dispatches a one-time compute pass that fills a device-local instance buffer with a paraboloid **bowl of N distinct cubes** (index 0 is the ground slab). The draw is still a single `vkCmdDrawIndexedIndirect`. This is an explicit GPU-throughput stress scene, not a physics simulation or the asset pipeline; it is logged as `GPU bowl generator` at startup. Shadow cascades still use the 82-cube M1 source grid, so stress-scene shadows are intentionally not matched.Verified at 1,000 and 100,000 instances on the Intel dev GPU.
 
 ---
 

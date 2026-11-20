@@ -101,11 +101,8 @@ impl Renderer {
             shadow.views(),
             shadow.sampler(),
             obj_path.as_deref(),
+            instance_count,
         )?;
-        if let Some(count) = instance_count {
-            mesh.set_instance_count(count)?;
-            info!(count, "instance count override applied at construction");
-        }
         let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
@@ -257,6 +254,7 @@ impl Renderer {
             new_shadow.views(),
             new_shadow.sampler(),
             obj_path.as_deref(),
+            *instance_count,
         )?;
         let new_taa = TaaPass::new(
             context,
@@ -289,10 +287,6 @@ impl Renderer {
         *mesh = new_mesh;
         *shadow = new_shadow;
         *targets = new_targets;
-        if let Some(count) = *instance_count {
-            mesh.set_instance_count(count)?;
-            info!(count, "instance count override reapplied after resize");
-        }
         *last_view_projection = None;
         *pass_valid = vec![false; image_count];
         tracing::info!(
