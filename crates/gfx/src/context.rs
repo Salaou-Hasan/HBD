@@ -659,6 +659,49 @@ impl VulkanContext {
         self.timestamps_supported
     }
 
+    /// Executes a one-time command buffer and waits for it to finish.
+    pub fn one_time_commands<F>(&self, f: F) -> Result<(), GfxError>
+    where
+        F: FnOnce(&ash::Device, vk::CommandBuffer),
+    {
+        unsafe {
+            let allocate_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(self.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let command_buffers = self
+                .device
+                .allocate_command_buffers(&allocate_info)
+                .map_err(GfxError::Vulkan)?;
+            let command_buffer = command_buffers[0];
+
+            let result = (|| {
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                self.device
+                    .begin_command_buffer(command_buffer, &begin_info)
+                    .map_err(GfxError::Vulkan)?;
+                f(&self.device, command_buffer);
+                self.device
+                    .end_command_buffer(command_buffer)
+                    .map_err(GfxError::Vulkan)?;
+
+                let command_buffers = [command_buffer];
+                let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+                self.device
+                    .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
+                    .map_err(GfxError::Vulkan)?;
+                self.device
+                    .queue_wait_idle(self.graphics_queue)
+                    .map_err(GfxError::Vulkan)
+            })();
+
+            self.device
+                .free_command_buffers(self.command_pool, &command_buffers);
+            result
+        }
+    }
+
     fn recreate_swapchain(&mut self) -> Result<(), GfxError> {
         unsafe {
             self.device.device_wait_idle().map_err(GfxError::Vulkan)?;
