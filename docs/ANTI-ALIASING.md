@@ -18,25 +18,25 @@ HBTR is implemented in `crates/render/src/taa_resolve.wgsl`. It is not a copy of
 
 1. **Single-pass 3×3 YCoCg moment analysis.** One neighborhood loop yields mean and variance for clipping *and* the average used for sharpening — no extra fetches for contrast recovery.
 2. **Variance box + segment clipping.** History is clipped to `mean ± σ` intersected with the true neighborhood min/max, in YCoCg, by intersecting the segment from the neighborhood mean to the history color with the box (no corner accumulation).
-3. **Confidence blend without a velocity buffer.** Instead of storing motion vectors, HBTR derives a per-pixel confidence from (a) how far history was reprojected in pixels and (b) how much the history color had to be clipped. Blend slides from the base 0.9 toward 0.5 when either signal is large. No extra render target, no G-buffer extension.
+3. **Confidence blend plus object velocity.** Reprojection confidence comes from (a) how far history was reprojected in pixels and (b) how much the history color had to be clipped; the blend slides from 0.9 toward 0.5 when either is large. A second color attachment (`R16G16B16A16_SFLOAT`) carries **object motion only** — current and previous poses under the same view-projection — so camera motion cancels and stays with the depth reprojection, avoiding double counting.
 4. **Luminance-adaptive accumulation.** Current and history weights are divided by `1 + luma`, suppressing fireflies from bright HDR samples (Karis-style, applied to our blend).
-5. **Out-of-screen / behind-camera rejection** before any history reuse, with the first frame of a history slot using blend 0.
+5. **History validity and rejection.** Out-of-screen/behind-camera samples are rejected, freshly allocated or post-resize history is never sampled (an explicit per-image `history-valid` flag prevents an undefined sample from poisoning the luminance-weighted blend into black), and the first frame of a history slot uses blend 0.
 
-History is per swapchain image, with its own previous view-projection pose and ping-pong slot (see `crates/render/src/hbtr.rs`). This is what fixed the earlier reprojection error: with three swapchain images an image's history is three frames old, not one.
+History is per swapchain image, with its own jittered previous view-projection pose and ping-pong slot (see `crates/render/src/hbtr.rs`). With three swapchain images an image's history is three frames old, not one; using one shared matrix was the original ghosting bug. The resolve and the history copy are now a single draw with two color attachments.
 
-## Cost and quality (Intel UHD, 1280×720, 900 frames)
+## Cost and quality (Intel UHD, release build, uncapped, moving camera)
 
-| Config | GPU frame p50 | AA pass p50 |
+| Internal resolution | GPU frame p50 | AA pass p50 |
 |---|---|---|
-| No AA, SSAO bilateral denoise | 2.14 ms | 0 |
-| HBTR enabled | 3.34 ms | 0.89 ms |
+| 1280×720 native | 1.85 ms | 0.45 ms |
+| 2560×1440 | 9.28 ms | 2.06 ms |
 
-The AA pass costs ~0.9 ms on the integrated GPU; on the RTX 3060 target this is a small fraction of a 16.6 ms budget. Present FPS stays near the 120 Hz cap. The cost buys: subpixel-smooth edges, temporal smoothing of the remaining SSAO speckle, and no ghosting on the orbit path. Debug views `0` (final), `4` (AO), `6` (shadow) and `7` (history) are available for inspection.
+The AA pass is ~0.45 ms at native 720p and ~2 ms at 1440p on the integrated GPU; on an RTX 3060-class card that is a small fraction of a 16.6 ms budget. The cost buys subpixel-smooth edges, temporal smoothing of stochastic SSAO, and no ghosting on the orbit path. Debug views `0` (final), `4` (AO), `6` (shadow) and `7` (history) are available for inspection; the sandbox also exposes `--debug <view>`.
 
 ## Limitations
 
-- No motion-vector buffer: moving *objects* (not yet in the engine) would need one. Camera motion is handled correctly by per-image previous matrices.
-- No temporal upscaling: HBTR is native-resolution AA only.
+- Velocity is object-motion only: both endpoints use the current view-projection, so camera motion is entirely owned by depth reprojection. `--animate` exercises the object path with an explicit readback; a formal no-ghosting reference capture is still outstanding.
+- No temporal upscaling: internal resolution presets upscale with the tonemap's linear sampler only. A TAAU/FSR2-style multi-frame upscale is the natural next step (1080p internal → 1440p/4K display) and would be the largest remaining visual win.
 - The pass cache skips shadow/geometry/SSAO/bloom on identical camera poses but **not** HBTR — temporal accumulation must continue.
 - History debug view 7 samples the read slot captured at pass construction; it may not show the latest ping-pong slot.
 
