@@ -29,6 +29,7 @@ struct Sandbox {
     cull_stats: bool,
     animate: bool,
     uncapped: bool,
+    debug_view: Option<DebugView>,
     render_resolution: RenderResolution,
     instances: Option<u32>,
     fps_smoothed: f32,
@@ -106,6 +107,11 @@ impl PlatformHandler for Sandbox {
                 if self.animate {
                     renderer.set_object_animation(true);
                     info!("object animation requested via --animate");
+                }
+                if let Some(view) = self.debug_view
+                    && let Err(error) = renderer.set_debug_view(view)
+                {
+                    error!(%error, ?view, "failed to set startup debug view");
                 }
                 if let Err(error) = renderer.set_render_resolution(self.render_resolution) {
                     error!(%error, "failed to set render resolution");
@@ -372,6 +378,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The sandbox is a performance validation app: run uncapped by default and
     // expose --vsync for the display-locked A/B comparison.
     let uncapped = !args.iter().any(|arg| arg == "--vsync");
+    let debug_view =
+        args.windows(2)
+            .find(|pair| pair[0] == "--debug")
+            .and_then(|pair| match pair[1].to_ascii_lowercase().as_str() {
+                "final" => Some(DebugView::Final),
+                "filmic" => Some(DebugView::Filmic),
+                "hdr" => Some(DebugView::Hdr),
+                "bloom" => Some(DebugView::Bloom),
+                "ao" => Some(DebugView::AmbientOcclusion),
+                "depth" => Some(DebugView::Depth),
+                "shadow" => Some(DebugView::ShadowCascade),
+                "taa" => Some(DebugView::TemporalHistory),
+                _ => None,
+            });
     let render_resolution = args
         .windows(2)
         .find(|pair| pair[0] == "--res")
@@ -398,6 +418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         animate,
         uncapped,
         resolution = render_resolution.label(),
+        ?debug_view,
         instances,
         "sandbox profiling configuration"
     );
@@ -449,6 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cull_stats,
                     animate,
                     uncapped,
+                    debug_view,
                     render_resolution,
                     instances,
                     fps_smoothed: 0.0,

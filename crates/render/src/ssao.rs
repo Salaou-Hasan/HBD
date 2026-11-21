@@ -586,7 +586,9 @@ impl SsaoPass {
         let params = SsaoParams {
             projection: projection.to_cols_array_2d(),
             inverse_projection: projection.inverse().to_cols_array_2d(),
-            settings: [1.4, 0.02, 1.4, 0.0],
+            // Small radius keeps occlusion at contact points instead of
+            // darkening whole prop faces; lower intensity avoids dark entities.
+            settings: [0.7, 0.05, 0.75, 0.0],
         };
         self.uniform_buffers[index as usize]
             .write(bytemuck::bytes_of(&params))
