@@ -39,8 +39,10 @@ fn reconstruct(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return view_position.xyz / view_position.w;
 }
 
-fn hash(value: vec2<f32>) -> f32 {
-    return fract(sin(dot(value, vec2<f32>(127.1, 311.7))) * 43758.5453);
+// Interleaved gradient noise: only rotates the sample pattern, so it cannot
+// inject white-noise variance into the AO value the way a sin() hash does.
+fn rotation(uv: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(uv, vec2<f32>(0.06711056, 0.00583715))));
 }
 
 @fragment
@@ -51,23 +53,40 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let view_position = reconstruct(input.uv, depth);
-    let normal = normalize(cross(dpdx(view_position), dpdy(view_position)));
+    // Framebuffer y grows downward, so this order points the hemisphere out
+    // of the surface (toward the camera) rather than into it.
+    let normal = normalize(cross(dpdy(view_position), dpdx(view_position)));
     let radius = params.settings.x;
     let bias = params.settings.y;
 
+    // Tangent basis for a stable hemisphere. The fallback avoids a degenerate
+    // cross product when the surface faces the camera directly.
+    var tangent = cross(normal, vec3<f32>(0.0, 0.0, 1.0));
+    if (length(tangent) < 0.001) {
+        tangent = cross(normal, vec3<f32>(0.0, 1.0, 0.0));
+    }
+    tangent = normalize(tangent);
+    let bitangent = cross(normal, tangent);
+
+    // Golden-angle spiral: 16 samples cover the hemisphere evenly instead of
+    // clustering randomly. A cheap per-pixel rotation decorrelates neighbours
+    // while keeping the variance low enough for the bilateral denoise.
+    let golden_angle = 2.39996323;
+    let spin = rotation(input.uv * vec2<f32>(textureDimensions(depth_texture))) * 6.2831853;
     var occlusion = 0.0;
+    var total_weight = 0.0;
     for (var i: i32 = 0; i < 16; i = i + 1) {
         let fi = f32(i);
-        let r1 = hash(input.uv + vec2<f32>(fi * 0.137, 0.0)) * 2.0 - 1.0;
-        let r2 = hash(input.uv.yx + vec2<f32>(0.0, fi * 0.219)) * 2.0 - 1.0;
-        let r3 = hash(input.uv + vec2<f32>(fi * 0.071, fi * 0.193)) * 2.0 - 1.0;
+        let r = sqrt((fi + 0.5) / 16.0);
+        let theta = fi * golden_angle + spin;
+        let local = vec3<f32>(
+            cos(theta) * r,
+            sin(theta) * r,
+            sqrt(max(0.0, 1.0 - r * r)),
+        );
+        let direction = normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 
-        var direction = normalize(normal + vec3<f32>(r1, r2, r3));
-        if (dot(direction, normal) < 0.0) {
-            direction = -direction;
-        }
-
-        let scale = radius * (0.15 + 0.85 * (fi / 16.0));
+        let scale = radius * r;
         let sample_position = view_position + direction * scale;
         let clip = params.projection * vec4<f32>(sample_position, 1.0);
         if (clip.w <= 0.0) {
@@ -80,14 +99,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         let sample_depth = read_depth(sample_uv);
-        let sample_view = reconstruct(sample_uv, sample_depth);
-        let delta = sample_view - view_position;
-        let distance = length(delta);
-        let range_weight = clamp(1.0 - distance / radius, 0.0, 1.0);
-        let occluded = select(0.0, 1.0, sample_view.z > view_position.z + bias);
+        let scene_view = reconstruct(sample_uv, sample_depth);
+        // Compare against the hemisphere sample we intended to test, not the
+        // centre pixel: the latter reports depth discontinuities as occlusion
+        // and is the source of the speckle on flat surfaces.
+        let occluded = select(0.0, 1.0, scene_view.z > sample_position.z + bias);
+        let range_weight = clamp(1.0 - scale / radius, 0.0, 1.0);
         occlusion = occlusion + occluded * range_weight;
+        total_weight = total_weight + range_weight;
     }
 
-    let ao = clamp(1.0 - occlusion / 16.0 * params.settings.z, 0.0, 1.0);
+    let ao = clamp(1.0 - occlusion / max(total_weight, 0.001) * params.settings.z, 0.0, 1.0);
     return vec4<f32>(ao, ao, ao, 1.0);
 }
