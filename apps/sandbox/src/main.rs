@@ -408,7 +408,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "taa" => Some(DebugView::TemporalHistory),
                 _ => None,
             });
-    let upscale = args.iter().any(|arg| arg == "--upscale");
+    // `--upscale` is the 50% shortcut; `--upscale-N` selects N percent of the
+    // live window size (1..=100). Both are auto modes that follow resizes.
+    let upscale_percent = args.iter().find_map(|arg| {
+        arg.strip_prefix("--upscale-")
+            .and_then(|value| value.parse::<u32>().ok())
+            .map(|value| value.clamp(1, 100))
+    });
+    let upscale = args.iter().any(|arg| arg == "--upscale") || upscale_percent.is_some();
     let render_resolution = args
         .windows(2)
         .find(|pair| pair[0] == "--res")
@@ -432,7 +439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --upscale keeps the internal render size at half the live window size,
     // including after maximize/fullscreen, with no manual resolution choice.
     let render_resolution = if upscale {
-        RenderResolution::Auto(50)
+        RenderResolution::Auto(upscale_percent.unwrap_or(50))
     } else {
         render_resolution
     };
@@ -451,6 +458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         uncapped,
         resolution = render_resolution.label(),
         upscale,
+        auto_percent = upscale_percent,
         hbtr_tier = hbtr_quality.level(),
         ?debug_view,
         instances,

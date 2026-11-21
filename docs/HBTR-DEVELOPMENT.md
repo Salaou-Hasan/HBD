@@ -114,7 +114,7 @@ tiers is < 0.1 ms. Re-measure on any hardware change and update this table.
 
 ## Open work (do not claim it is done)
 
-- **Automatic upscale toggle**: `--upscale` selects `RenderResolution::Auto(50)`, which recomputes the internal size on every swapchain rebuild. Verified 640x360 at a 1280x720 window and 1280x778 after maximizing to 2560x1555. It overrides `--res` and needs no manual configuration.
+- **Automatic upscale toggle**: `--upscale` selects `RenderResolution::Auto(50)`; `--upscale-N` selects N percent (1..=100, clamped). Both recompute the internal size on every swapchain rebuild and override `--res`. Verified 640x360 at a 1280x720 window and 1280x778 after maximizing to 2560x1555 at 50%.
 - **Cubic history reconstruction**: HBTRU currently reconstructs current colour
   bilinearly from the nine existing taps. A 4-tap Catmull-Rom history filter is
   the next visual step; it must be measured because it adds fetches.

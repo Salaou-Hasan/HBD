@@ -287,5 +287,10 @@ mod tests {
         let auto_fullscreen = RenderResolution::Auto(50).extent(fullscreen);
         assert_eq!(auto_fullscreen.width, 1280);
         assert_eq!(auto_fullscreen.height, 778);
+        assert_eq!(RenderResolution::Auto(100).extent(window), window);
+        assert_eq!(
+            RenderResolution::Auto(0).extent(window),
+            RenderResolution::Auto(1).extent(window)
+        );
     }
 }
