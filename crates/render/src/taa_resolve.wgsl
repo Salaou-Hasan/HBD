@@ -116,7 +116,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var history = current;
     var motion_confidence = 1.0;
     var clip_confidence = 0.0;
-    if (depth < 0.9999) {
+    // `settings.w` is the per-image history-valid flag. After a resize or on
+    // the first frame a history slot is undefined; sampling it would inject
+    // NaNs into the luminance-weighted blend even when the weight is zero.
+    if (params.settings.w > 0.5 && depth < 0.9999) {
         let ndc = vec4<f32>(input.uv.x * 2.0 - 1.0, 1.0 - input.uv.y * 2.0, depth, 1.0);
         let world = params.inverse_view_projection * ndc;
         let world_position = world.xyz / world.w;
@@ -156,8 +159,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let blend = mix(params.settings.x, 0.5, motion_confidence);
     // Recover contrast lost to temporal filtering, reusing the neighborhood mean.
     let sharpened_current = current + (current - neighborhood_average) * 0.12;
-    let source_weight = (1.0 - blend) / (1.0 + luminance(sharpened_current));
-    let history_weight = blend / (1.0 + luminance(history));
+    let source_weight = (1.0 - blend) / max(1.0 + luminance(sharpened_current), 0.00001);
+    let history_weight = blend / max(1.0 + luminance(history), 0.00001);
     let resolved = (sharpened_current * source_weight + history * history_weight)
         / max(source_weight + history_weight, 0.00001);
 

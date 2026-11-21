@@ -511,7 +511,8 @@ impl TaaPass {
     ) -> Result<(), RenderError> {
         let index = index as usize;
         let inverse = current_view_projection.inverse();
-        let blend = if self.initialized[index] { 0.9 } else { 0.0 };
+        let valid = self.initialized[index];
+        let blend = if valid { 0.9 } else { 0.0 };
         let params = TaaParams {
             inverse_view_projection: inverse.to_cols_array_2d(),
             previous_view_projection: self.previous_view_projections[index].to_cols_array_2d(),
@@ -519,7 +520,10 @@ impl TaaPass {
                 blend,
                 1.0 / self.extent.width as f32,
                 1.0 / self.extent.height as f32,
-                0.0,
+                // The resolve shader must not sample a freshly allocated (or
+                // post-resize) history image: its contents are undefined and a
+                // single NaN poisons the whole weighted blend into black.
+                if valid { 1.0 } else { 0.0 },
             ],
         };
         self.uniform_buffers[index]
