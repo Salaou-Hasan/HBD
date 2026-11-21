@@ -62,6 +62,9 @@ pub struct Renderer {
     light: DirectionalLight,
     /// Active presentation path, driven by `RendererConfig::hdr`.
     hdr_enabled: bool,
+    /// Demo object animation; only meaningful while culling is enabled because
+    /// it rewrites the compacted per-image buffers.
+    object_animation: bool,
     /// Last presented image; used only by the explicit cull-stats readback.
     last_image_index: u32,
 }
@@ -125,7 +128,13 @@ impl Renderer {
             targets.depth_views(),
             extent,
         )?;
-        let taa = TaaPass::new(&context, targets.hdr_views(), targets.depth_views(), extent)?;
+        let taa = TaaPass::new(
+            &context,
+            targets.hdr_views(),
+            targets.depth_views(),
+            targets.velocity_views(),
+            extent,
+        )?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
             taa.resolved_views()
@@ -177,6 +186,7 @@ impl Renderer {
             instance_count,
             light,
             hdr_enabled,
+            object_animation: false,
             last_image_index: 0,
         })
     }
@@ -190,6 +200,25 @@ impl Renderer {
         info!(enabled, "GPU frustum culling explicitly toggled");
     }
 
+    /// Explicit demo animation switch for motion-vector validation. The pose
+    /// pass writes the compacted buffers, so it requires culling and it
+    /// invalidates the static-camera pass cache.
+    pub fn set_object_animation(&mut self, enabled: bool) {
+        self.object_animation = enabled && self.cull_enabled();
+        if enabled && !self.cull_enabled() {
+            info!("object animation requires culling; staying static");
+        }
+        if enabled {
+            self.last_view_projection = None;
+            self.pass_valid.fill(false);
+        }
+        info!(enabled = self.object_animation, "object animation toggled");
+    }
+
+    fn cull_enabled(&self) -> bool {
+        self.mesh.culling_enabled()
+    }
+
     /// Explicit, stalled readback of the last culled count. Returns
     /// (visible instances, total instances, triangles per instance).
     pub fn cull_counts(&self) -> Result<(u32, u32, u32), RenderError> {
@@ -201,6 +230,18 @@ impl Renderer {
             self.mesh.total_count(),
             self.mesh.triangles_per_instance(),
         ))
+    }
+
+    /// Explicit, stalled readback that proves the animation pass wrote poses.
+    /// Returns (instances with current != previous model, visible, max delta).
+    pub fn visible_motion(&self) -> Result<(u32, u32, f32), RenderError> {
+        let visible = self
+            .mesh
+            .read_visible_count(&self.context, self.last_image_index)?;
+        let (moved, max_delta) =
+            self.mesh
+                .read_visible_motion(&self.context, self.last_image_index, visible)?;
+        Ok((moved, visible, max_delta))
     }
 
     /// Explicit presentation-path switch. Mirrors `RendererConfig::hdr`.
@@ -302,6 +343,7 @@ impl Renderer {
             instance_count,
             light,
             hdr_enabled,
+            object_animation: _,
             last_image_index: _,
         } = self;
         let extent = context.swapchain_extent();
@@ -325,6 +367,7 @@ impl Renderer {
             context,
             new_targets.hdr_views(),
             new_targets.depth_views(),
+            new_targets.velocity_views(),
             extent,
         )?;
         let new_ssao = SsaoPass::new(context, new_targets.depth_views(), extent)?;
@@ -387,6 +430,7 @@ impl Renderer {
             instance_count: _,
             light,
             hdr_enabled: _,
+            object_animation,
             last_image_index,
         } = self;
         let extent = context.swapchain_extent();
@@ -395,8 +439,9 @@ impl Renderer {
         let frame_number = *frame_index;
         let slot = (frame_number % FRAME_SLOTS as u64) as usize;
         let view_projection = camera.view_projection(aspect);
-        let camera_unchanged =
-            *pass_cache_enabled && *last_view_projection == Some(view_projection);
+        let camera_unchanged = *pass_cache_enabled
+            && !*object_animation
+            && *last_view_projection == Some(view_projection);
 
         if camera_unchanged {
             *cached_frames += 1;
@@ -436,7 +481,6 @@ impl Renderer {
             Vec2::ZERO
         };
         let jittered_view_projection = camera.view_projection_with_jitter(aspect, jitter);
-        let unjittered_view_projection = view_projection;
         let geometry_clear_values = targets.clear_values();
         let mut taa_error: Option<RenderError> = None;
 
@@ -485,7 +529,13 @@ impl Renderer {
                         }
                         // Per-image cull: compacted instances and the indirect
                         // count are private to this swapchain image.
-                        mesh.dispatch_cull(command_buffer, image_index, view_projection);
+                        mesh.dispatch_cull(
+                            command_buffer,
+                            image_index,
+                            view_projection,
+                            frame_number,
+                            *object_animation,
+                        );
                         shadow.record(command_buffer);
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {
@@ -520,7 +570,9 @@ impl Renderer {
 
                     if HBTR_ENABLED && !reuse {
                         taa.record(command_buffer, image_index);
-                        taa.end_frame_for_index(unjittered_view_projection, image_index);
+                        // Store the jittered pose: history samples were written
+                        // with this exact projection, so reprojection must use it.
+                        taa.end_frame_for_index(jittered_view_projection, image_index);
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.mark(command_buffer, slot, MARK_TAA, frame_number);

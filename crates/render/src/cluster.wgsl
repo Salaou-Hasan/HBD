@@ -10,6 +10,7 @@ const CLUSTER_SIZE: u32 = 256u;
 
 struct Instance {
     model: mat4x4<f32>,
+    previous_model: mat4x4<f32>,
     base_color: vec4<f32>,
     material: vec4<f32>,
 };

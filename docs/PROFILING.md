@@ -50,6 +50,21 @@ Those limits are the current Intel baseline plus margin. On the 82-cube orbit ba
 
 `--instances 1000000` dispatches a one-time compute pass that fills a device-local buffer with 1,000,000 distinct cubes in a paraboloid bowl (ground slab + 999,999 cubes), drawn with one `vkCmdDrawIndexedIndirect` = **12M triangles**. Intel dev GPU, 1280x720, moving camera, 20 frames: GPU frame **78.4 ms**, of which geometry **76.4 ms**; shadow 0.74, HBTR 0.50, SSAO 0.38, bloom 0.15, tonemap 0.14 ms. This is a correctness/scale demo, not a 60 fps result; the RTX 3060-class gate remains pending.
 
+### 4M-instance verification (cluster + HZB + bindless + velocity)
+
+`--instances 4000000 --frames 130 --cull-stats`, Intel at 1280x720, moving camera, frame 120: **1,357,643 / 4,000,000 visible instances = 16,291,716 visible triangles**, `target_10m_met=true`, ~11 fps. Visible counts move with the wall-clock camera path (an earlier run reported 1,048,055 / 12,576,660); both exceed the 10M target. Cluster/HZB are conservative: the 82-instance scene reports 28–31 visible with no over-culling, and the static-camera count (31) is unchanged after motion vectors and bindless materials were added.
+
+### Motion-vector validation
+
+There is no screenshot path in the sandbox, so motion-vector correctness is verified by an explicit stalled readback instead of a claimed visual result. `--animate` runs `animate.wgsl` over the compacted instances after cull (it writes poses, never the source buffer) and sets `previous_model` to the pose from the frame that wrote this image's history slot. The readback compares each compacted instance's current and previous model, so a changing compaction order cannot create a false positive:
+
+| Run | moved | visible | max delta |
+|---|---|---|---|
+| `--animate` (moving camera) | 27 | 28 | 0.0434 |
+| `--static-camera --animate` | 30 | 31 | 0.0434 |
+
+The ground slab is excluded by scale, which is why `moved` is one less than `visible`. `--no-cull --animate` logs `object animation requires culling; staying static` rather than silently producing a different scene than the culled path. Static-camera and `--no-cache` runs exit 0 with no validation errors and no pass-count change.
+
 ## Measured results — Intel UHD / 1280x720 / 900 frames / 120 Hz present
 
 Steady-state window (last 200 frames), GPU milliseconds:
@@ -69,6 +84,9 @@ Reported presentation FPS stays near 120 because the swapchain uses FIFO/lowest-
 
 1. **Offscreen pass cache (enabled by default).** When the camera view-projection matrix is bit-identical to the pose that produced a given swapchain image's HDR/AO/bloom/shadow data, those four passes are skipped for that image. Correctness is per-image: each swapchain image carries its own validity flag, invalidated on any camera change, cache toggle, or resize. Uniform uploads are skipped only under the same condition. Every hit prints `offscreen cache HIT`, every invalidation prints `camera changed or cache disabled`, and a 240-frame `offscreen pass cache accounting` line reports full vs cached frames. `--no-cache` disables it.
 2. **Resize dedupe.** `Renderer::resize` compares the swapchain extent before and after `VulkanContext::resize`. If it is unchanged, no passes are rebuilt; the event is logged as `resize ignored: swapchain extent unchanged (no pass rebuild)`. This removes redundant WGSL recompilation during winit's DPI-settle resize events.
+3. **Cluster + HZB occlusion culling.** 256-instance clusters get one conservative sphere at init; a per-frame compute pass tests each sphere against the frustum and the previous frame's max-depth HZB before per-instance culling runs. HZB rejection is conservative (reject only when the cluster's max depth is behind the recorded max), so it cannot remove visible geometry.
+4. **Bindless materials.** One `texture_2d_array` with four procedural layers; `material.w` picks the layer. No descriptor writes at draw time.
+5. **Jitter-consistent motion vectors.** Velocity uses the same view-projection for both model poses (camera motion cancels and stays with HBTR's depth reprojection). HBTR stores the jittered pose per image, so history probing matches the exact projection that wrote that image's history. `--animate` provides real object motion and an explicit readback proof.
 
 ## Rejected experiment (kept out of the tree)
 

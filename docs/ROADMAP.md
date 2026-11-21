@@ -62,11 +62,17 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 
 Delivered so far: GPU timestamp profiler with CSV export and percentile reports; explicit pass cache with per-image validity and `--no-cache` A/B; resize dedupe. Measured on the Intel dev GPU: static-camera GPU frame p50 **4.074 ms → 0.645 ms** (6.3x) with pixel-identical output; moving camera unchanged (~4.1 ms) and no regression. A precomputed-SSAO-sample experiment was measured as a regression and reverted. Full numbers and the no-hidden-operations rule are in [PROFILING.md](PROFILING.md) and [ADR 0004](adr/0004-visible-operations.md).
 
-Remaining M2 work: bindless materials/textures, motion vectors for HBTR with dynamic objects, and the RTX 3060-class 1440p/60 gate. The p99 regression gate now exists (`tools/profile-check.ps1`) and the profiler resolves 112/120 frames instead of 1/20.
+Remaining M2 work: the RTX 3060-class 1440p/60 gate (needs the target GPU) and the dynamic-object ghosting capture list. Bindless materials, cluster/HZB occlusion culling, and motion vectors are delivered below. The p99 regression gate now exists (`tools/profile-check.ps1`) and the profiler resolves 112/120 frames instead of 1/20.
 
 **GPU frustum culling (per-image, safe A/B):** `cull.wgsl` tests each instance against six frustum planes and compacts survivors with `atomicAdd` into the indirect `instanceCount`. Both the compacted buffer and the indirect args are **per swapchain image**, with per-image cull and graphics descriptor sets — with 2 frames in flight an image is only reused after 3 frames, so it is guaranteed idle. The count is reset in the command buffer with `vkCmdFillBuffer` (TRANSFER → COMPUTE barrier) and published to the draw with a COMPUTE → VERTEX_SHADER|DRAW_INDIRECT barrier. `--no-cull` uses a separate graphics set and CPU-written indirect buffer bound to the *source* instances, so it can never read an unwritten compacted buffer. `--cull-stats` reports visible instances, visible triangles, and whether the 10M target is met via a one-off stalled readback.
 
-**10M+ visible triangles — MET:** with `--instances 4000000` and a moving camera (geometry redrawn every frame, no pass-cache hits), frame 120 reports **1,048,055 / 4,000,000 visible instances = 12,576,660 visible triangles** (`target_10m_met=true`) on Intel at 1280x720, ~16 fps. Frustum culling removes ~74% of the source set in that view. Static camera at the same scale reaches 16.1M visible triangles but hits the pass cache after frame 3, so the moving-camera number is the honest one. Cluster/HZB occlusion culling remains a future throughput optimization for even larger source sets; it was not required to reach the 10M visible count.
+**10M+ visible triangles — MET:** with `--instances 4000000` and a moving camera (geometry redrawn every frame, no pass-cache hits), frame 120 reports **1,357,643 / 4,000,000 visible instances = 16,291,716 visible triangles** (`target_10m_met=true`) on Intel at 1280x720, ~11 fps. Counts vary with the wall-clock camera path; the target has been met on every recorded run (earliest: 1,048,055 instances / 12,576,660 triangles).
+
+**Cluster + HZB occlusion culling (delivered):** instances are grouped into `CLUSTER_SIZE = 256` clusters. `cluster.wgsl::init_cs` builds one conservative bounding sphere per cluster once; `cluster_cull_cs` tests each sphere against the six frustum planes and the previous frame's max-depth HZB (`HZB_MIPS = 3`, half resolution), and writes per-image visibility flags. `cull.wgsl` early-returns on a zero flag before its per-instance test. The HZB is rebuilt from the *previous* frame's depth with a conservative max reduction, so it can only reject geometry that was definitely behind last frame's occluders. Verified with `--cull-stats`: no over-culling; 82-instance scene reports 28–31 visible depending on pose, 4M scene still exceeds 10M triangles.
+
+**Bindless material table (delivered):** the mesh pipeline samples a 4-layer `texture_2d_array` (`material_textures` / `material_sampler`, bindings 6/7) generated procedurally at startup. `Instance.material.w` selects the layer, so material changes never touch descriptors and there are no per-draw descriptor updates. `Instance` is 160 bytes: `model(64) + previous_model(64) + base_color(16) + material(16)`.
+
+**Motion vectors (delivered, 2026-11-21):** a second color attachment `R16G16B16A16_SFLOAT` carries UV-space object motion. The vertex shader emits NDC for the current and previous model under the *same* view-projection, so camera motion cancels and is owned by HBTR's depth reprojection instead of being double-counted; NDC is `@interpolate(linear)` because it is linear in screen space. HBTR subtracts the velocity from the reprojected history UV and now stores the **jittered** pose per image, so history samples land exactly where the previous render of that image wrote them. `--animate` spins a bounded prefix of the compacted instances (`animate.wgsl`, ground slab filtered by scale) and sets `previous_model` to the pose from the frame that produced this image's history slot. Explicit readback verifies the pass actually wrote motion: `moved=27 visible=28 max_delta=0.0434` (moving camera) and `moved=30 visible=31` (static camera). `--no-cull --animate` logs that animation requires culling and stays static instead of silently differing.
 
 **Presentation path:** `RendererConfig::hdr` is consumed via `Renderer::new_with_config`. HDR/AgX is the active default again (restored on user request); setting `hdr: false` selects the clamped-LDR presentation path that preserves the saturated palette. Both paths are compiled and explicitly logged at startup.
 
@@ -74,7 +80,7 @@ Remaining M2 work: bindless materials/textures, motion vectors for HBTR with dyn
 
 **Instance-count stress mode:** `--instances N` dispatches a one-time compute pass that fills a device-local instance buffer with a paraboloid **bowl of N distinct cubes** (index 0 is the ground slab). The draw is still a single `vkCmdDrawIndexedIndirect`. This is an explicit GPU-throughput stress scene, not a physics simulation or the asset pipeline; it is logged as `GPU bowl generator` at startup. Shadow cascades still use the 82-cube M1 source grid, so stress-scene shadows are intentionally not matched. Verified at 1k, 100k, and 1M instances (1M = 12M triangles, 78.4 ms GPU on Intel at 720p).
 
-**Motion-vector attempt (reverted):** a velocity attachment and HBTR velocity transform were implemented but produced corrupted imagery even with AA disabled, so the whole attempt was reverted to the last clean commit. No half-working code is left in the tree.
+**Sky uniform layout fix:** `sky.wgsl` declared the pre-CSM `Frame` layout (three matrices), so `eye_position`/`light_direction` were read from the wrong offsets. The struct now matches `FrameUniform` member-for-member and the sky fragment writes an explicit zero velocity instead of leaving the second attachment undefined.
 
 ---
 
@@ -86,9 +92,9 @@ Remaining M2 work: bindless materials/textures, motion vectors for HBTR with dyn
 
 - Replace per-instance CPU draws with indirect/multi-draw; target **1M GPU-driven draw items**.
 - Target **10M+ visible triangles** with cluster/frustum culling on the GPU.
-- Bindless descriptor sets and material/texture caching; eliminate per-draw descriptor updates.
+- Bindless descriptor sets and material/texture caching; eliminate per-draw descriptor updates. ✅ 4-layer bindless material array
 - Frame-time profiling (p50/p99), GPU timestamps, and a regression dashboard.
-- Character/object motion vectors so HBTR can reproject dynamic objects exactly (camera motion already works).
+- Character/object motion vectors so HBTR can reproject dynamic objects exactly (camera motion already works). ✅ velocity attachment + jitter-consistent reprojection
 
 **Exit criteria:** 1440p/60 fps on RTX 3060-class with the scale targets enabled; no p99 regressions; HBTR passes the no-ghosting camera-pan test.
 

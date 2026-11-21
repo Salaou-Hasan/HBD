@@ -5,11 +5,10 @@
 // a physics simulation.
 //
 // The Instance layout must match mesh.wgsl and the Rust `Instance` struct:
-// model (64) + base_color (16) + material (16) = 96 bytes. `previous_model`
-// is deliberately NOT part of this layout; adding it silently corrupts the
-// vertex shader's instance stride.
+// model (64) + previous_model (64) + base_color (16) + material (16) = 160 bytes.
 struct Instance {
     model: mat4x4<f32>,
+    previous_model: mat4x4<f32>,
     base_color: vec4<f32>,
     material: vec4<f32>,
 };
@@ -37,6 +36,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             vec4<f32>(0.0, -2.1, 0.0, 1.0),
         );
         instances[index].model = ground_model;
+        instances[index].previous_model = ground_model;
         instances[index].base_color = vec4<f32>(0.12, 0.13, 0.15, 1.0);
         instances[index].material = vec4<f32>(0.0, 0.92, 1.0, 0.0);
         return;
@@ -68,6 +68,7 @@ fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
 
     instances[index].model = model;
+    instances[index].previous_model = model;
     instances[index].base_color = base_color;
     instances[index].material = vec4<f32>(0.15, 0.42, 1.0, 0.0);
 }

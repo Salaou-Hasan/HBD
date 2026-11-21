@@ -27,6 +27,7 @@ struct Sandbox {
     no_cache: bool,
     no_cull: bool,
     cull_stats: bool,
+    animate: bool,
     instances: Option<u32>,
     fps_smoothed: f32,
 }
@@ -89,6 +90,10 @@ impl PlatformHandler for Sandbox {
                     info!("GPU frustum culling disabled via --no-cull");
                 } else {
                     info!("GPU frustum culling enabled (default)");
+                }
+                if self.animate {
+                    renderer.set_object_animation(true);
+                    info!("object animation requested via --animate");
                 }
                 if let Some(count) = self.instances
                     && let Err(error) = renderer.set_instance_count(count)
@@ -245,6 +250,17 @@ impl PlatformHandler for Sandbox {
                     Err(error) => error!(%error, "GPU cull stats readback failed"),
                 }
             }
+            if self.animate
+                && let Some(renderer) = self.renderer.as_ref()
+            {
+                match renderer.visible_motion() {
+                    Ok((moved, visible, max_delta)) => info!(
+                        frame = self.time.frame(),
+                        moved, visible, max_delta, "motion-vector poses (explicit readback)"
+                    ),
+                    Err(error) => error!(%error, "motion-vector pose readback failed"),
+                }
+            }
         }
     }
 }
@@ -302,6 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_cache = args.iter().any(|arg| arg == "--no-cache");
     let no_cull = args.iter().any(|arg| arg == "--no-cull");
     let cull_stats = args.iter().any(|arg| arg == "--cull-stats");
+    let animate = args.iter().any(|arg| arg == "--animate");
     let instances = args
         .windows(2)
         .find(|pair| pair[0] == "--instances")
@@ -313,6 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         no_cache,
         no_cull,
         cull_stats,
+        animate,
         instances,
         "sandbox profiling configuration"
     );
@@ -362,6 +380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     no_cache,
                     no_cull,
                     cull_stats,
+                    animate,
                     instances,
                     fps_smoothed: 0.0,
                 },

@@ -65,6 +65,7 @@ impl TaaPass {
         context: &VulkanContext,
         hdr_views: &[vk::ImageView],
         depth_views: &[vk::ImageView],
+        velocity_views: &[vk::ImageView],
         extent: vk::Extent2D,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
@@ -251,6 +252,11 @@ impl TaaPass {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(5)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
         let resolve_set_layout = unsafe {
             device.create_descriptor_set_layout(
@@ -320,7 +326,7 @@ impl TaaPass {
                 .descriptor_count((image_count * 2) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count((image_count * 6) as u32),
+                .descriptor_count((image_count * 8) as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count((image_count * 2) as u32),
@@ -385,6 +391,9 @@ impl TaaPass {
                 let depth_infos = [vk::DescriptorImageInfo::default()
                     .image_view(depth_views[index])
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                let velocity_infos = [vk::DescriptorImageInfo::default()
+                    .image_view(velocity_views[index])
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
                 let uniform_infos = [vk::DescriptorBufferInfo::default()
                     .buffer(uniform_buffers[index].buffer())
                     .offset(0)
@@ -415,6 +424,11 @@ impl TaaPass {
                         .dst_binding(4)
                         .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                         .buffer_info(&uniform_infos),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(5)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(&velocity_infos),
                 ];
                 unsafe {
                     device.update_descriptor_sets(&writes, &[]);

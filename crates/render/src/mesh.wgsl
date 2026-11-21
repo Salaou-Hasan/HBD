@@ -14,6 +14,7 @@ struct Frame {
 
 struct Instance {
     model: mat4x4<f32>,
+    previous_model: mat4x4<f32>,
     base_color: vec4<f32>,
     material: vec4<f32>, // metallic, roughness, ao, unused
 };
@@ -42,6 +43,10 @@ struct VertexOutput {
     @location(5) light_clip2: vec4<f32>,
     @location(6) view_distance: f32,
     @location(7) material: vec4<f32>,
+    // NDC is linear in screen space, so interpolate it linearly instead of
+    // perspective-correcting clip coordinates before the divide.
+    @location(8) @interpolate(linear) current_ndc: vec2<f32>,
+    @location(9) @interpolate(linear) previous_ndc: vec2<f32>,
 };
 
 @vertex
@@ -58,11 +63,18 @@ fn vs_main(
     output.world_normal = normalize((instance.model * vec4<f32>(input.normal, 0.0)).xyz);
     output.base_color = instance.base_color.rgb;
     output.material = instance.material;
+    // Object motion only: both endpoints use the same view-projection, so the
+    // camera part cancels and HBTR's depth reprojection owns camera motion.
+    let current_clip = frame.view_projection * world_position;
+    let previous_clip =
+        frame.view_projection * instance.previous_model * vec4<f32>(input.position, 1.0);
+    output.current_ndc = current_clip.xy / current_clip.w;
+    output.previous_ndc = previous_clip.xy / previous_clip.w;
     output.light_clip0 = frame.light_vp0 * world_position;
     output.light_clip1 = frame.light_vp1 * world_position;
     output.light_clip2 = frame.light_vp2 * world_position;
     output.view_distance = length(frame.eye_position.xyz - world_position.xyz);
-    output.clip_position = frame.view_projection * world_position;
+    output.clip_position = current_clip;
     return output;
 }
 
@@ -122,8 +134,13 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) velocity: vec4<f32>,
+};
+
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> FragmentOutput {
     let normal = normalize(input.world_normal);
     let light = normalize(frame.light_direction.xyz);
     let view = normalize(frame.eye_position.xyz - input.world_position);
@@ -167,5 +184,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = reflection * f0 * (1.0 - roughness * 0.7) * ao;
 
     let color = direct + diffuse_ibl + specular_ibl;
-    return vec4<f32>(color, 1.0);
+    // Screen-space object motion in UV units. Y is flipped because image space
+    // grows downward while NDC grows upward.
+    let velocity = (input.current_ndc - input.previous_ndc) * vec2<f32>(0.5, -0.5);
+    return FragmentOutput(vec4<f32>(color, 1.0), vec4<f32>(velocity, 0.0, 0.0));
 }

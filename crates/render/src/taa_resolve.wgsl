@@ -18,6 +18,7 @@ struct TaaParams {
     settings: vec4<f32>,
 };
 @group(0) @binding(4) var<uniform> params: TaaParams;
+@group(0) @binding(5) var velocity_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -121,10 +122,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let world_position = world.xyz / world.w;
         let previous_clip = params.previous_view_projection * vec4<f32>(world_position, 1.0);
         if (previous_clip.w > 0.0) {
-            let history_uv = vec2<f32>(
+            let velocity = textureSample(velocity_texture, taa_sampler, input.uv).xy;
+            var history_uv = vec2<f32>(
                 previous_clip.x / previous_clip.w * 0.5 + 0.5,
                 0.5 - previous_clip.y / previous_clip.w * 0.5,
             );
+            // Object motion, already in UV units (Y flipped to image space).
+            // Camera motion is the reprojection above, so this is not double
+            // counted: the velocity attachment only stores model-matrix change.
+            history_uv = history_uv - velocity;
             if (history_uv.x >= 0.0 && history_uv.x <= 1.0
                 && history_uv.y >= 0.0 && history_uv.y <= 1.0)
             {

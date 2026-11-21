@@ -23,7 +23,12 @@ const MESH_GENERATE_WGSL: &str = include_str!("mesh_generate.wgsl");
 const CULL_WGSL: &str = include_str!("cull.wgsl");
 const CLUSTER_WGSL: &str = include_str!("cluster.wgsl");
 const HZB_WGSL: &str = include_str!("hzb.wgsl");
+const ANIMATE_WGSL: &str = include_str!("animate.wgsl");
 const HZB_MIPS: u32 = 3;
+/// Upper bound of compacted instances spun by the demo animation pass.
+const ANIMATE_LIMIT: u32 = 256;
+/// Radians per frame. Never baked into the pipeline: it only sets object poses.
+const ANIMATE_STEP: f32 = 0.03;
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 const GRID_HALF_EXTENT: i32 = 4;
@@ -54,6 +59,7 @@ struct FrameUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct Instance {
     model: [[f32; 4]; 4],
+    previous_model: [[f32; 4]; 4],
     base_color: [f32; 4],
     /// x: metallic, y: roughness, z: ambient occlusion, w: unused.
     material: [f32; 4],
@@ -77,6 +83,15 @@ struct Occlusion {
     mip_count: u32,
     enabled: u32,
     pad: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AnimateParams {
+    angle: f32,
+    previous_angle: f32,
+    count: u32,
+    pad: u32,
 }
 
 #[repr(C)]
@@ -147,6 +162,15 @@ pub(crate) struct MeshPass {
     occlusion_uniforms: Vec<GpuBuffer>,
     hzb_width: u32,
     hzb_height: u32,
+    /// Demo object animation over the compacted buffer (motion-vector proof).
+    animate_pipeline: vk::Pipeline,
+    animate_layout: vk::PipelineLayout,
+    animate_set_layout: vk::DescriptorSetLayout,
+    animate_pool: vk::DescriptorPool,
+    animate_sets: Vec<vk::DescriptorSet>,
+    animate_uniforms: Vec<GpuBuffer>,
+    /// Explicit verification readback for the animation pass.
+    animate_readback: GpuBuffer,
     uniform_buffer: GpuBuffer,
     index_count: u32,
     base_count: u32,
@@ -282,8 +306,10 @@ impl MeshPass {
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
             .blend_enable(false)
             .color_write_mask(vk::ColorComponentFlags::RGBA);
-        let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(std::slice::from_ref(&color_blend_attachment));
+        // Two color attachments: scene colour and the velocity buffer.
+        let color_blend_attachments = [color_blend_attachment, color_blend_attachment];
+        let color_blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
@@ -569,6 +595,121 @@ impl MeshPass {
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             MemoryLocation::CpuToGpu,
             "HBD frame uniform",
+        )?;
+
+        // --- Motion-vector animation resources ------------------------------
+        // One set per image: the pass rewrites only that image's compacted
+        // buffer, after its in-flight fence has been waited on.
+        let animate_bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
+        let animate_set_layout = unsafe {
+            device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&animate_bindings),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let animate_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&[animate_set_layout]),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let animate_spv =
+            shader::compile_wgsl(ANIMATE_WGSL, "cs_main", naga::ShaderStage::Compute)?;
+        let animate_module = create_shader_module(&device, &animate_spv)?;
+        let animate_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(animate_module)
+            .name(c"cs_main");
+        let animate_info = vk::ComputePipelineCreateInfo::default()
+            .layout(animate_layout)
+            .stage(animate_stage);
+        let animate_pipeline = unsafe {
+            device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&animate_info),
+                None,
+            )
+        }
+        .map_err(|(_, error)| RenderError::Pipeline(error))?
+        .into_iter()
+        .next()
+        .ok_or(RenderError::MissingPipeline)?;
+        unsafe { device.destroy_shader_module(animate_module, None) };
+
+        let animate_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .pool_sizes(&[
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_count(image_count),
+                        vk::DescriptorPoolSize::default()
+                            .ty(vk::DescriptorType::STORAGE_BUFFER)
+                            .descriptor_count(image_count),
+                    ])
+                    .max_sets(image_count),
+                None,
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let animate_layouts = vec![animate_set_layout; image_count as usize];
+        let animate_sets = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(animate_pool)
+                    .set_layouts(&animate_layouts),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let mut animate_uniforms = Vec::with_capacity(image_count as usize);
+        for (index, set) in animate_sets.iter().enumerate() {
+            let animate_uniform = context.create_buffer(
+                size_of::<AnimateParams>() as u64,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                MemoryLocation::CpuToGpu,
+                "HBD animate uniform",
+            )?;
+            let uniform_info = [vk::DescriptorBufferInfo::default()
+                .buffer(animate_uniform.buffer())
+                .offset(0)
+                .range(animate_uniform.size())];
+            let visible_info = [vk::DescriptorBufferInfo::default()
+                .buffer(visible_buffers[index].buffer())
+                .offset(0)
+                .range(visible_buffers[index].size())];
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&uniform_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&visible_info),
+            ];
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+            animate_uniforms.push(animate_uniform);
+        }
+        let animate_readback = context.create_buffer(
+            u64::from(ANIMATE_LIMIT) * size_of::<Instance>() as u64,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::CpuToGpu,
+            "HBD animate readback",
         )?;
 
         // --- GPU frustum culling resources ---------------------------------
@@ -1483,6 +1624,13 @@ impl MeshPass {
             occlusion_uniforms,
             hzb_width,
             hzb_height,
+            animate_pipeline,
+            animate_layout,
+            animate_set_layout,
+            animate_pool,
+            animate_sets,
+            animate_uniforms,
+            animate_readback,
             uniform_buffer,
             index_count,
             base_count,
@@ -1564,6 +1712,10 @@ impl MeshPass {
         self.cull_enabled = enabled;
     }
 
+    pub(crate) fn culling_enabled(&self) -> bool {
+        self.cull_enabled
+    }
+
     pub(crate) fn total_count(&self) -> u32 {
         self.base_count
     }
@@ -1580,6 +1732,8 @@ impl MeshPass {
         command_buffer: vk::CommandBuffer,
         image_index: u32,
         view_projection: hbd_core::math::Mat4,
+        frame_number: u64,
+        animate: bool,
     ) {
         if !self.cull_enabled {
             return;
@@ -1724,6 +1878,59 @@ impl MeshPass {
             );
             device.cmd_dispatch(command_buffer, self.base_count.div_ceil(256), 1, 1);
 
+            // Optional object animation: rewrite the poses the cull just
+            // compacted. The source buffer is untouched, so nothing accumulates.
+            if animate {
+                let count = self.base_count.min(ANIMATE_LIMIT);
+                if count > 0 {
+                    // This image's history slot was written `image_count`
+                    // frames ago, so the previous pose must have that age.
+                    let history_age = self.animate_sets.len() as f32;
+                    let current = frame_number as f32 * ANIMATE_STEP;
+                    let previous = (frame_number as f32 - history_age).max(0.0) * ANIMATE_STEP;
+                    let params = AnimateParams {
+                        angle: current,
+                        previous_angle: previous,
+                        count,
+                        pad: 0,
+                    };
+                    self.animate_uniforms[index]
+                        .write(bytemuck::bytes_of(&params))
+                        .map_err(RenderError::Gfx)
+                        .ok();
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[vk::BufferMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                            .dst_access_mask(
+                                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                            )
+                            .buffer(self.visible_buffers[index].buffer())
+                            .offset(0)
+                            .size(vk::WHOLE_SIZE)],
+                        &[],
+                    );
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.animate_pipeline,
+                    );
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        vk::PipelineBindPoint::COMPUTE,
+                        self.animate_layout,
+                        0,
+                        std::slice::from_ref(&self.animate_sets[index]),
+                        &[],
+                    );
+                    device.cmd_dispatch(command_buffer, count.div_ceil(64), 1, 1);
+                }
+            }
+
             let barriers = [
                 vk::BufferMemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -1774,6 +1981,54 @@ impl MeshPass {
             .read(&mut bytes)
             .map_err(RenderError::Gfx)?;
         Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Explicit, stalled readback that proves the animation pass wrote poses.
+    /// It compares each compacted instance's current and previous model, so a
+    /// changing compaction order cannot produce a false positive.
+    pub(crate) fn read_visible_motion(
+        &self,
+        context: &VulkanContext,
+        image_index: u32,
+        count: u32,
+    ) -> Result<(u32, f32), RenderError> {
+        let count = count.min(ANIMATE_LIMIT);
+        let size = u64::from(count) * size_of::<Instance>() as u64;
+        if size == 0 {
+            return Ok((0, 0.0));
+        }
+        context
+            .one_time_commands(|device, command_buffer| unsafe {
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    self.visible_buffers[image_index as usize].buffer(),
+                    self.animate_readback.buffer(),
+                    &[vk::BufferCopy::default().size(size)],
+                );
+            })
+            .map_err(RenderError::Gfx)?;
+        let mut bytes = vec![0u8; size as usize];
+        self.animate_readback
+            .read(&mut bytes)
+            .map_err(RenderError::Gfx)?;
+        let instances: &[Instance] = bytemuck::cast_slice(&bytes);
+        let mut moved = 0u32;
+        let mut max_delta = 0.0f32;
+        for instance in instances {
+            let mut delta = 0.0f32;
+            for column in 0..4 {
+                for row in 0..4 {
+                    let difference =
+                        (instance.model[column][row] - instance.previous_model[column][row]).abs();
+                    delta = delta.max(difference);
+                }
+            }
+            if delta > 1.0e-5 {
+                moved += 1;
+                max_delta = max_delta.max(delta);
+            }
+        }
+        Ok((moved, max_delta))
     }
 
     pub(crate) fn record(
@@ -1905,6 +2160,12 @@ impl Drop for MeshPass {
             self.device.destroy_descriptor_pool(self.hzb_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.hzb_set_layout, None);
+            self.device.destroy_pipeline(self.animate_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.animate_layout, None);
+            self.device.destroy_descriptor_pool(self.animate_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.animate_set_layout, None);
         }
     }
 }
@@ -2012,10 +2273,12 @@ pub(crate) fn build_scene() -> Vec<Instance> {
     ];
 
     // A single flat cube acts as the ground plane.
+    let ground_model = (Mat4::from_translation(Vec3::new(0.0, -0.85, 0.0))
+        * Mat4::from_scale(Vec3::new(14.0, 0.2, 14.0)))
+    .to_cols_array_2d();
     instances.push(Instance {
-        model: (Mat4::from_translation(Vec3::new(0.0, -0.85, 0.0))
-            * Mat4::from_scale(Vec3::new(14.0, 0.2, 14.0)))
-        .to_cols_array_2d(),
+        model: ground_model,
+        previous_model: ground_model,
         base_color: [0.12, 0.13, 0.15, 1.0],
         material: [0.0, 0.92, 1.0, 0.0],
     });
@@ -2036,8 +2299,10 @@ pub(crate) fn build_scene() -> Vec<Instance> {
             let metallic = pattern as f32 / 4.0 * 0.85;
             let roughness = 0.18 + cool * 0.65;
             let color = PALETTE[(x * 3 + z * 5).rem_euclid(PALETTE.len() as i32) as usize];
+            let model = model.to_cols_array_2d();
             instances.push(Instance {
-                model: model.to_cols_array_2d(),
+                model,
+                previous_model: model,
                 base_color: [color[0], color[1], color[2], 1.0],
                 material: [metallic, roughness, 1.0, (x + z).rem_euclid(4) as f32],
             });
@@ -2163,8 +2428,10 @@ pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance),
         * Mat4::from_rotation_y(std::f32::consts::PI)
         * Mat4::from_scale(Vec3::splat(scale))
         * Mat4::from_translation(-center);
+    let model = model.to_cols_array_2d();
     let instance = Instance {
-        model: model.to_cols_array_2d(),
+        model,
+        previous_model: model,
         base_color: [0.06, 0.16, 0.5, 1.0],
         material: [0.18, 0.36, 1.0, 0.0],
     };
