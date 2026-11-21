@@ -60,6 +60,10 @@ Release build, Intel, 1280x720, moving camera, 600 frames:
 
 The bottleneck was the presentation cap, not a render pass: with FIFO the CPU render call includes the wait for the previous frame's fence and present semaphore. Under IMMEDIATE the same passes cost shadow 0.17, geometry 0.39, TAA 0.50, SSAO 0.50, bloom 0.15, tonemap 0.16 ms (p50). MAILBOX is preferred when the driver exposes it: it is uncapped **and** tear-free. IMMEDIATE is only used with the explicit uncapped policy and may tear on displays without MAILBOX.
 
+### Fullscreen is pixel-bound, not capped
+
+Maximizing 1280x720 → 2560x1555 quadruples the fragment work. The present mode stays IMMEDIATE (verified in the log), and FPS settles at ~100–110 because the GPU frame is ~9.3 ms. Measured fullscreen p50 by pass: SSAO 2.20, TAA 2.06, geometry 1.74, bloom 0.75, tonemap 0.72, shadow 0.35 ms. The TAA resolve and its history copy are now a **single draw with two color attachments** (same output pixels, one less full-screen pass): TAA 2.46 → 2.06 ms, total 9.69 → 9.28 ms. Further gains at this resolution require either a faster GPU or an explicit render-scale/quality tradeoff; rendering at full swapchain resolution is deliberately kept lossless.
+
 ### 1M-instance stress scene
 
 `--instances 1000000` dispatches a one-time compute pass that fills a device-local buffer with 1,000,000 distinct cubes in a paraboloid bowl (ground slab + 999,999 cubes), drawn with one `vkCmdDrawIndexedIndirect` = **12M triangles**. Intel dev GPU, 1280x720, moving camera, 20 frames: GPU frame **78.4 ms**, of which geometry **76.4 ms**; shadow 0.74, HBTR 0.50, SSAO 0.38, bloom 0.15, tonemap 0.14 ms. This is a correctness/scale demo, not a 60 fps result; the RTX 3060-class gate remains pending.

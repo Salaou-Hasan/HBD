@@ -17,7 +17,6 @@ use crate::render_targets::HDR_FORMAT;
 use crate::shader;
 
 const RESOLVE_WGSL: &str = include_str!("taa_resolve.wgsl");
-const COPY_WGSL: &str = include_str!("taa_copy.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 
@@ -35,20 +34,17 @@ pub(crate) struct TaaPass {
     _history_images: Vec<GpuImage>,
     resolved_views: Vec<vk::ImageView>,
     history_views: Vec<Vec<vk::ImageView>>,
-    resolved_framebuffers: Vec<vk::Framebuffer>,
-    history_framebuffers: Vec<Vec<vk::Framebuffer>>,
+    /// Per image, per history parity: attachment 0 is the stable presented
+    /// image, attachment 1 is that parity's history slot. Both are written by
+    /// the resolve draw, so the old full-screen copy pass is gone.
+    resolve_framebuffers: Vec<Vec<vk::Framebuffer>>,
     sampler: vk::Sampler,
     render_pass: vk::RenderPass,
     resolve_pipeline: vk::Pipeline,
-    copy_pipeline: vk::Pipeline,
     resolve_layout: vk::PipelineLayout,
-    copy_layout: vk::PipelineLayout,
     resolve_set_layout: vk::DescriptorSetLayout,
-    copy_set_layout: vk::DescriptorSetLayout,
     resolve_pool: vk::DescriptorPool,
-    copy_pool: vk::DescriptorPool,
     resolve_sets: Vec<Vec<vk::DescriptorSet>>,
-    copy_sets: Vec<vk::DescriptorSet>,
     uniform_buffers: Vec<GpuBuffer>,
     /// Reprojection pose for each swapchain image's own history pair. An image
     /// is only revisited every `image_count` frames, so one shared matrix would
@@ -141,21 +137,29 @@ impl TaaPass {
         }
         .map_err(GfxError::Vulkan)?;
 
-        let attachments = [vk::AttachmentDescription::default()
-            .format(HDR_FORMAT)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let color_reference = vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let attachment = || {
+            vk::AttachmentDescription::default()
+                .format(HDR_FORMAT)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        };
+        let attachments = [attachment(), attachment()];
+        let color_references = [
+            vk::AttachmentReference::default()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            vk::AttachmentReference::default()
+                .attachment(1)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+        ];
         let subpasses = [vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_reference))];
+            .color_attachments(&color_references)];
         let dependencies = [
             vk::SubpassDependency::default()
                 .src_subpass(vk::SUBPASS_EXTERNAL)
@@ -188,13 +192,14 @@ impl TaaPass {
         }
         .map_err(GfxError::Vulkan)?;
 
-        let make_framebuffer = |view: vk::ImageView| -> Result<vk::Framebuffer, RenderError> {
+        let make_resolve_framebuffer = |presented: vk::ImageView, history: vk::ImageView| {
+            let attachments = [presented, history];
             unsafe {
                 device
                     .create_framebuffer(
                         &vk::FramebufferCreateInfo::default()
                             .render_pass(render_pass)
-                            .attachments(std::slice::from_ref(&view))
+                            .attachments(&attachments)
                             .width(extent.width)
                             .height(extent.height)
                             .layers(1),
@@ -204,12 +209,11 @@ impl TaaPass {
             }
         };
 
-        let mut resolved_framebuffers = Vec::with_capacity(image_count);
-        let mut history_framebuffers = vec![Vec::with_capacity(2); image_count];
+        let mut resolve_framebuffers = vec![Vec::with_capacity(2); image_count];
         for index in 0..image_count {
-            resolved_framebuffers.push(make_framebuffer(resolved_views[index])?);
-            for view in history_views[index].iter().take(2) {
-                history_framebuffers[index].push(make_framebuffer(*view)?);
+            for history in history_views[index].iter().take(2) {
+                resolve_framebuffers[index]
+                    .push(make_resolve_framebuffer(resolved_views[index], *history)?);
             }
         }
 
@@ -217,14 +221,8 @@ impl TaaPass {
             shader::compile_wgsl(RESOLVE_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
         let resolve_fragment_spv =
             shader::compile_wgsl(RESOLVE_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
-        let copy_vertex_spv =
-            shader::compile_wgsl(COPY_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let copy_fragment_spv =
-            shader::compile_wgsl(COPY_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
         let resolve_vertex_module = create_shader_module(&device, &resolve_vertex_spv)?;
         let resolve_fragment_module = create_shader_module(&device, &resolve_fragment_spv)?;
-        let copy_vertex_module = create_shader_module(&device, &copy_vertex_spv)?;
-        let copy_fragment_module = create_shader_module(&device, &copy_fragment_spv)?;
 
         let resolve_bindings = [
             vk::DescriptorSetLayoutBinding::default()
@@ -265,29 +263,7 @@ impl TaaPass {
             )
         }
         .map_err(GfxError::Vulkan)?;
-        let copy_bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-        ];
-        let copy_set_layout = unsafe {
-            device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&copy_bindings),
-                None,
-            )
-        }
-        .map_err(GfxError::Vulkan)?;
-
         let resolve_layout = create_pipeline_layout(&device, resolve_set_layout)?;
-        let copy_layout = create_pipeline_layout(&device, copy_set_layout)?;
-
         let resolve_pipeline = create_fullscreen_pipeline(
             &device,
             resolve_layout,
@@ -295,19 +271,10 @@ impl TaaPass {
             resolve_vertex_module,
             resolve_fragment_module,
         )?;
-        let copy_pipeline = create_fullscreen_pipeline(
-            &device,
-            copy_layout,
-            render_pass,
-            copy_vertex_module,
-            copy_fragment_module,
-        )?;
 
         unsafe {
             device.destroy_shader_module(resolve_vertex_module, None);
             device.destroy_shader_module(resolve_fragment_module, None);
-            device.destroy_shader_module(copy_vertex_module, None);
-            device.destroy_shader_module(copy_fragment_module, None);
         }
 
         let mut uniform_buffers = Vec::with_capacity(image_count);
@@ -346,33 +313,6 @@ impl TaaPass {
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(resolve_pool)
                     .set_layouts(&resolve_set_layouts),
-            )
-        }
-        .map_err(GfxError::Vulkan)?;
-
-        let copy_pool_sizes = [
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(image_count as u32),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(image_count as u32),
-        ];
-        let copy_pool = unsafe {
-            device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .pool_sizes(&copy_pool_sizes)
-                    .max_sets(image_count as u32),
-                None,
-            )
-        }
-        .map_err(GfxError::Vulkan)?;
-        let copy_set_layouts = vec![copy_set_layout; image_count];
-        let copy_sets = unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(copy_pool)
-                    .set_layouts(&copy_set_layouts),
             )
         }
         .map_err(GfxError::Vulkan)?;
@@ -435,25 +375,6 @@ impl TaaPass {
                 }
                 resolve_sets[index].push(set);
             }
-
-            let source_infos = [vk::DescriptorImageInfo::default()
-                .image_view(resolved_views[index])
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-            let writes = [
-                vk::WriteDescriptorSet::default()
-                    .dst_set(copy_sets[index])
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .image_info(&sampler_infos),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(copy_sets[index])
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(&source_infos),
-            ];
-            unsafe {
-                device.update_descriptor_sets(&writes, &[]);
-            }
         }
 
         tracing::info!(
@@ -470,20 +391,14 @@ impl TaaPass {
             _history_images: history_images,
             resolved_views,
             history_views,
-            resolved_framebuffers,
-            history_framebuffers,
+            resolve_framebuffers,
             sampler,
             render_pass,
             resolve_pipeline,
-            copy_pipeline,
             resolve_layout,
-            copy_layout,
             resolve_set_layout,
-            copy_set_layout,
             resolve_pool,
-            copy_pool,
             resolve_sets,
-            copy_sets,
             uniform_buffers,
             previous_view_projections: vec![Mat4::IDENTITY; image_count],
             initialized: vec![false; image_count],
@@ -545,21 +460,24 @@ impl TaaPass {
         let read = self.read_history[index];
         let write = 1 - read;
 
-        let clear_values = [vk::ClearValue {
+        let clear_color = vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.0, 0.0, 0.0, 1.0],
             },
-        }];
+        };
+        let clear_values = [clear_color, clear_color];
         let render_area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: self.extent,
         };
 
         unsafe {
-            // Resolve current + reprojected history into the resolved target.
+            // One draw writes both the presented image and the new history
+            // slot. The old full-screen copy pass is gone; same pixels, fewer
+            // passes and less bandwidth.
             let resolve_info = vk::RenderPassBeginInfo::default()
                 .render_pass(self.render_pass)
-                .framebuffer(self.resolved_framebuffers[index])
+                .framebuffer(self.resolve_framebuffers[index][write])
                 .render_area(render_area)
                 .clear_values(&clear_values);
             self.device.cmd_begin_render_pass(
@@ -572,25 +490,6 @@ impl TaaPass {
                 self.resolve_pipeline,
                 self.resolve_layout,
                 self.resolve_sets[index][read],
-            );
-            self.device.cmd_end_render_pass(command_buffer);
-
-            // Copy the resolved result into the other history slot.
-            let copy_info = vk::RenderPassBeginInfo::default()
-                .render_pass(self.render_pass)
-                .framebuffer(self.history_framebuffers[index][write])
-                .render_area(render_area)
-                .clear_values(&clear_values);
-            self.device.cmd_begin_render_pass(
-                command_buffer,
-                &copy_info,
-                vk::SubpassContents::INLINE,
-            );
-            self.draw(
-                command_buffer,
-                self.copy_pipeline,
-                self.copy_layout,
-                self.copy_sets[index],
             );
             self.device.cmd_end_render_pass(command_buffer);
         }
@@ -639,20 +538,12 @@ impl Drop for TaaPass {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.resolve_pipeline, None);
-            self.device.destroy_pipeline(self.copy_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.resolve_layout, None);
-            self.device.destroy_pipeline_layout(self.copy_layout, None);
             self.device.destroy_descriptor_pool(self.resolve_pool, None);
-            self.device.destroy_descriptor_pool(self.copy_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.resolve_set_layout, None);
-            self.device
-                .destroy_descriptor_set_layout(self.copy_set_layout, None);
-            for framebuffer in &self.resolved_framebuffers {
-                self.device.destroy_framebuffer(*framebuffer, None);
-            }
-            for framebuffers in &self.history_framebuffers {
+            for framebuffers in &self.resolve_framebuffers {
                 for framebuffer in framebuffers {
                     self.device.destroy_framebuffer(*framebuffer, None);
                 }
@@ -717,8 +608,9 @@ fn create_fullscreen_pipeline(
     let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
         .blend_enable(false)
         .color_write_mask(vk::ColorComponentFlags::RGBA);
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::default()
-        .attachments(std::slice::from_ref(&color_blend_attachment));
+    let color_blend_attachments = [color_blend_attachment, color_blend_attachment];
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);

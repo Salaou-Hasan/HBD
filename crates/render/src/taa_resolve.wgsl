@@ -84,8 +84,15 @@ fn clip_aabb(box_min: vec3<f32>, box_max: vec3<f32>, average: vec3<f32>, value: 
     return average + ray * t;
 }
 
+struct FragmentOutput {
+    @location(0) resolved: vec4<f32>,
+    // Written in the same draw as `resolved`: this replaces the old
+    // full-screen copy pass that duplicated the resolve into history.
+    @location(1) history: vec4<f32>,
+};
+
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(input: VertexOutput) -> FragmentOutput {
     let texel = params.settings.yz;
     let current = textureSample(current_texture, taa_sampler, input.uv).rgb;
     let depth = textureSample(depth_texture, taa_sampler, input.uv);
@@ -164,5 +171,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let resolved = (sharpened_current * source_weight + history * history_weight)
         / max(source_weight + history_weight, 0.00001);
 
-    return vec4<f32>(resolved, 1.0);
+    let output = vec4<f32>(resolved, 1.0);
+    return FragmentOutput(output, output);
 }
