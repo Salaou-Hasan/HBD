@@ -36,12 +36,17 @@ pub(crate) struct ShadowPass {
     layout: vk::PipelineLayout,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
+    /// Live-override sets: bound to the host-written instance buffer.
     descriptor_sets: Vec<vk::DescriptorSet>,
+    /// Source sets: bound to the mesh source buffer (`--no-cull` A/B).
+    descriptor_sets_source: Vec<vk::DescriptorSet>,
+    /// Per-image sets: bound to the GPU-compacted visible instance buffer.
+    descriptor_sets_culled: Vec<Vec<vk::DescriptorSet>>,
     // One uniform buffer per cascade, bound through its own descriptor set.
-    _uniform_buffers: Vec<GpuBuffer>,
+    uniform_buffers: Vec<GpuBuffer>,
     vertex_buffer: GpuBuffer,
     index_buffer: GpuBuffer,
-    _instance_buffer: GpuBuffer,
+    instance_buffer: GpuBuffer,
     index_count: u32,
     instance_count: u32,
 }
@@ -283,11 +288,18 @@ impl ShadowPass {
             bytemuck::cast_slice(&indices),
             "HBD shadow index buffer",
         )?;
-        let instance_buffer = context.upload_buffer(
+        // Host-visible and written each frame: `update_instances` pushes live
+        // entity poses into it, so the shadow pass tracks entities instead of a
+        // startup snapshot.
+        let instance_buffer = context.create_buffer(
+            u64::from(instances.len() as u32) * size_of::<mesh::Instance>() as u64 * 2,
             vk::BufferUsageFlags::STORAGE_BUFFER,
-            bytemuck::cast_slice(&instances),
+            MemoryLocation::CpuToGpu,
             "HBD shadow instance buffer",
         )?;
+        instance_buffer
+            .write(bytemuck::cast_slice(&instances))
+            .map_err(RenderError::Gfx)?;
 
         let mut uniform_buffers = Vec::with_capacity(cascade_count);
         for extent in CASCADE_EXTENTS {
@@ -305,20 +317,23 @@ impl ShadowPass {
             uniform_buffers.push(buffer);
         }
 
-        let set_count = cascade_count as u32;
+        let image_count = context.swapchain_image_views().len();
+        // Three variants per cascade: live override, source (`--no-cull`), and
+        // one per swapchain image for the GPU-compacted visible instances.
+        let set_count = cascade_count * (2 + image_count);
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(set_count),
+                .descriptor_count(set_count as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(set_count),
+                .descriptor_count(set_count as u32),
         ];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .pool_sizes(&pool_sizes)
-                    .max_sets(set_count),
+                    .max_sets(set_count as u32),
                 None,
             )
         }
@@ -332,6 +347,27 @@ impl ShadowPass {
             )
         }
         .map_err(GfxError::Vulkan)?;
+        let descriptor_sets_source = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(descriptor_pool)
+                    .set_layouts(&set_layouts),
+            )
+        }
+        .map_err(GfxError::Vulkan)?;
+        let mut descriptor_sets_culled = Vec::with_capacity(image_count);
+        for _ in 0..image_count {
+            descriptor_sets_culled.push(
+                unsafe {
+                    device.allocate_descriptor_sets(
+                        &vk::DescriptorSetAllocateInfo::default()
+                            .descriptor_pool(descriptor_pool)
+                            .set_layouts(&set_layouts),
+                    )
+                }
+                .map_err(GfxError::Vulkan)?,
+            );
+        }
 
         let instance_info = [vk::DescriptorBufferInfo::default()
             .buffer(instance_buffer.buffer())
@@ -377,10 +413,12 @@ impl ShadowPass {
             descriptor_set_layout,
             descriptor_pool,
             descriptor_sets,
-            _uniform_buffers: uniform_buffers,
+            descriptor_sets_source,
+            descriptor_sets_culled,
+            uniform_buffers,
             vertex_buffer,
             index_buffer,
-            _instance_buffer: instance_buffer,
+            instance_buffer,
             index_count: indices.len() as u32,
             instance_count: instances.len() as u32,
         })
@@ -394,7 +432,114 @@ impl ShadowPass {
         self.sampler
     }
 
-    pub(crate) fn record(&self, command_buffer: vk::CommandBuffer) {
+    /// Connects the shadow pass to the mesh instance buffers. The culled sets
+    /// read the GPU-compacted per-image buffers, so the shadow map draws the
+    /// same instances the geometry pass draws this frame — no stale shadows
+    /// from objects that were culled or removed.
+    pub(crate) fn attach_mesh(
+        &mut self,
+        source: vk::Buffer,
+        source_size: u64,
+        per_image: &[vk::Buffer],
+        per_image_size: u64,
+    ) {
+        for (cascade, set) in self.descriptor_sets_source.iter().enumerate() {
+            self.write_instance_set(*set, cascade, source, source_size);
+        }
+        for (image, sets) in self.descriptor_sets_culled.iter().enumerate() {
+            if let Some(buffer) = per_image.get(image) {
+                for (cascade, set) in sets.iter().enumerate() {
+                    self.write_instance_set(*set, cascade, *buffer, per_image_size);
+                }
+            }
+        }
+        info!(
+            images = per_image.len(),
+            "shadow pass bound to live mesh instances"
+        );
+    }
+
+    fn write_instance_set(
+        &self,
+        set: vk::DescriptorSet,
+        cascade: usize,
+        instance_buffer: vk::Buffer,
+        instance_size: u64,
+    ) {
+        let uniform = &self.uniform_buffers[cascade];
+        let uniform_info = [vk::DescriptorBufferInfo::default()
+            .buffer(uniform.buffer())
+            .offset(0)
+            .range(uniform.size())];
+        let instance_info = [vk::DescriptorBufferInfo::default()
+            .buffer(instance_buffer)
+            .offset(0)
+            .range(instance_size)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&uniform_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&instance_info),
+        ];
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+    }
+
+    /// Replaces the instance data the shadow pass draws (hot-reload path).
+    ///
+    /// Empty input keeps the current data, so callers can feed
+    /// `frame.objects` unconditionally without clearing the shadow scene.
+    pub(crate) fn update_instances(
+        &mut self,
+        context: &VulkanContext,
+        instances: &[mesh::Instance],
+    ) -> Result<(), RenderError> {
+        if instances.is_empty() {
+            return Ok(());
+        }
+        let needed = u64::from(instances.len() as u32) * size_of::<mesh::Instance>() as u64;
+        if needed > self.instance_buffer.size() {
+            // Grow and rebind: descriptor ranges are rewritten below.
+            self.instance_buffer = context.create_buffer(
+                needed * 2,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                MemoryLocation::CpuToGpu,
+                "HBD shadow instance buffer (live)",
+            )?;
+        }
+        self.instance_buffer
+            .write(bytemuck::cast_slice(instances))
+            .map_err(RenderError::Gfx)?;
+        let buffer_info = [vk::DescriptorBufferInfo::default()
+            .buffer(self.instance_buffer.buffer())
+            .offset(0)
+            .range(self.instance_buffer.size())];
+        for set in &self.descriptor_sets {
+            let writes = [vk::WriteDescriptorSet::default()
+                .dst_set(*set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&buffer_info)];
+            unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        }
+        self.instance_count = instances.len() as u32;
+        Ok(())
+    }
+
+    pub(crate) fn record(
+        &self,
+        command_buffer: vk::CommandBuffer,
+        image_index: u32,
+        cull_enabled: bool,
+        live_override: bool,
+        cull_indirect: vk::Buffer,
+        source_indirect: vk::Buffer,
+    ) {
         let clear_values = [vk::ClearValue {
             depth_stencil: vk::ClearDepthStencilValue {
                 depth: 1.0,
@@ -439,12 +584,19 @@ impl ShadowPass {
                 });
                 self.device
                     .cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&scissor));
+                let set = if live_override {
+                    self.descriptor_sets[index]
+                } else if cull_enabled {
+                    self.descriptor_sets_culled[image_index as usize][index]
+                } else {
+                    self.descriptor_sets_source[index]
+                };
                 self.device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     self.layout,
                     0,
-                    std::slice::from_ref(&self.descriptor_sets[index]),
+                    std::slice::from_ref(&set),
                     &[],
                 );
                 self.device.cmd_bind_vertex_buffers(
@@ -459,14 +611,26 @@ impl ShadowPass {
                     0,
                     vk::IndexType::UINT32,
                 );
-                self.device.cmd_draw_indexed(
-                    command_buffer,
-                    self.index_count,
-                    self.instance_count,
-                    0,
-                    0,
-                    0,
-                );
+                if live_override {
+                    self.device.cmd_draw_indexed(
+                        command_buffer,
+                        self.index_count,
+                        self.instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                } else {
+                    // The geometry pass writes this count on the GPU, so the
+                    // shadow pass draws exactly the culled instance set.
+                    let indirect = if cull_enabled {
+                        cull_indirect
+                    } else {
+                        source_indirect
+                    };
+                    self.device
+                        .cmd_draw_indexed_indirect(command_buffer, indirect, 0, 1, 0);
+                }
                 self.device.cmd_end_render_pass(command_buffer);
             }
         }

@@ -10,7 +10,7 @@ use tracing::info;
 use crate::bloom::BloomPass;
 use crate::camera::{Camera, DirectionalLight};
 use crate::hbtr::TaaPass;
-use crate::mesh::MeshPass;
+use crate::mesh::{Instance, MeshPass};
 use crate::profiler::{FRAME_SLOTS, Profiler};
 use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
@@ -65,6 +65,9 @@ pub struct Renderer {
     /// Demo object animation; only meaningful while culling is enabled because
     /// it rewrites the compacted per-image buffers.
     object_animation: bool,
+    /// When live ECS instances are present the shadow pass draws its own
+    /// host-written buffer; otherwise it follows the mesh's culled instances.
+    shadow_live: bool,
     /// Last presented image; used only by the explicit cull-stats readback.
     last_image_index: u32,
 }
@@ -116,7 +119,7 @@ impl Renderer {
         let light = DirectionalLight::default();
 
         let targets = RenderTargets::new(&context, extent, image_count)?;
-        let shadow = ShadowPass::new(&context, &light)?;
+        let mut shadow = ShadowPass::new(&context, &light)?;
         let mesh = MeshPass::new(
             &context,
             targets.render_pass(),
@@ -128,6 +131,8 @@ impl Renderer {
             targets.depth_views(),
             extent,
         )?;
+        let (source, source_size, per_image, per_image_size) = mesh.shadow_instance_buffers();
+        shadow.attach_mesh(source, source_size, &per_image, per_image_size);
         let taa = TaaPass::new(
             &context,
             targets.hdr_views(),
@@ -187,6 +192,7 @@ impl Renderer {
             light,
             hdr_enabled,
             object_animation: false,
+            shadow_live: false,
             last_image_index: 0,
         })
     }
@@ -258,6 +264,22 @@ impl Renderer {
     pub fn set_light(&mut self, light: DirectionalLight) {
         info!(direction = ?light.direction, intensity = light.intensity, "directional light override applied");
         self.light = light;
+    }
+
+    /// Replaces the instance data the shadow pass draws, hot-reloading the
+    /// shadow scene. Empty input keeps the data but returns the shadow to the
+    /// mesh's live culled set, so the default startup scene still renders.
+    /// Invalidate the pass cache: shadows must redraw when entities change.
+    pub fn update_instances(&mut self, instances: &[Instance]) -> Result<(), RenderError> {
+        self.shadow.update_instances(&self.context, instances)?;
+        let live = !instances.is_empty();
+        if live {
+            self.last_view_projection = None;
+            self.pass_valid.fill(false);
+            tracing::info!(count = instances.len(), "shadow instances hot-reloaded");
+        }
+        self.shadow_live = live;
+        Ok(())
     }
 
     /// Explicit A/B switch for the offscreen-pass cache. Always logged.
@@ -344,6 +366,7 @@ impl Renderer {
             light,
             hdr_enabled,
             object_animation: _,
+            shadow_live: _,
             last_image_index: _,
         } = self;
         let extent = context.swapchain_extent();
@@ -351,7 +374,7 @@ impl Renderer {
         let light = *light;
 
         let new_targets = RenderTargets::new(context, extent, image_count)?;
-        let new_shadow = ShadowPass::new(context, &light)?;
+        let mut new_shadow = ShadowPass::new(context, &light)?;
         let new_mesh = MeshPass::new(
             context,
             new_targets.render_pass(),
@@ -363,6 +386,8 @@ impl Renderer {
             new_targets.depth_views(),
             extent,
         )?;
+        let (source, source_size, per_image, per_image_size) = new_mesh.shadow_instance_buffers();
+        new_shadow.attach_mesh(source, source_size, &per_image, per_image_size);
         let new_taa = TaaPass::new(
             context,
             new_targets.hdr_views(),
@@ -431,6 +456,7 @@ impl Renderer {
             light,
             hdr_enabled: _,
             object_animation,
+            shadow_live,
             last_image_index,
         } = self;
         let extent = context.swapchain_extent();
@@ -536,7 +562,15 @@ impl Renderer {
                             frame_number,
                             *object_animation,
                         );
-                        shadow.record(command_buffer);
+                        let cull_enabled = mesh.culling_enabled();
+                        shadow.record(
+                            command_buffer,
+                            image_index,
+                            cull_enabled,
+                            *shadow_live,
+                            mesh.shadow_indirect(image_index, cull_enabled),
+                            mesh.shadow_indirect(image_index, false),
+                        );
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.mark(command_buffer, slot, MARK_SHADOW, frame_number);

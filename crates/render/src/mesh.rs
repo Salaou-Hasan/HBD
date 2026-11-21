@@ -55,14 +55,17 @@ struct FrameUniform {
     shadow_splits: [f32; 4],
 }
 
+/// A live render instance: pose, pose of the previous frame, base color and
+/// material parameters. Shared by the mesh pass, the shadow pass, and scene
+/// (ECS) consumers so all passes draw the same data.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub(crate) struct Instance {
-    model: [[f32; 4]; 4],
-    previous_model: [[f32; 4]; 4],
-    base_color: [f32; 4],
+pub struct Instance {
+    pub model: [[f32; 4]; 4],
+    pub previous_model: [[f32; 4]; 4],
+    pub base_color: [f32; 4],
     /// x: metallic, y: roughness, z: ambient occlusion, w: unused.
-    material: [f32; 4],
+    pub material: [f32; 4],
 }
 
 #[repr(C)]
@@ -1714,6 +1717,36 @@ impl MeshPass {
 
     pub(crate) fn culling_enabled(&self) -> bool {
         self.cull_enabled
+    }
+
+    /// Instance buffers shared with the shadow pass: the source buffer, the
+    /// per-image GPU-compacted buffers, and their sizes.
+    pub(crate) fn shadow_instance_buffers(&self) -> (vk::Buffer, u64, Vec<vk::Buffer>, u64) {
+        let per_image = self
+            .visible_buffers
+            .iter()
+            .map(|buffer| buffer.buffer())
+            .collect();
+        let per_image_size = self
+            .visible_buffers
+            .first()
+            .map_or(0, |buffer| buffer.size());
+        (
+            self._instance_buffer.buffer(),
+            self._instance_buffer.size(),
+            per_image,
+            per_image_size,
+        )
+    }
+
+    /// Indirect draw buffer for the shadow pass: the GPU-written count when
+    /// culling is on, the CPU-written full-scene count otherwise.
+    pub(crate) fn shadow_indirect(&self, image_index: u32, cull_enabled: bool) -> vk::Buffer {
+        if cull_enabled {
+            self.indirect_buffers[image_index as usize].buffer()
+        } else {
+            self.indirect_buffer_no_cull.buffer()
+        }
     }
 
     pub(crate) fn total_count(&self) -> u32 {

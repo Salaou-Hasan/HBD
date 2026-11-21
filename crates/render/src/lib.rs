@@ -24,6 +24,7 @@ mod ssao;
 mod tonemap;
 
 pub use camera::{Camera, DirectionalLight};
+pub use mesh::Instance;
 
 /// Selectable buffer visualization for renderer debugging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

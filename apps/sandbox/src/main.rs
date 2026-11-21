@@ -212,6 +212,14 @@ impl PlatformHandler for Sandbox {
         // Explicit ECS schedule run: the camera and light consumed by the
         // renderer this frame come from entities, not from local temporaries.
         let frame = self.ecs_scene.run();
+        // Push live entities into the shadow pass: the shadow draws
+        // `frame.objects` in real time instead of the startup snapshot. An
+        // empty scene returns the shadow to the mesh's culled instance set.
+        if let Some(renderer) = self.renderer.as_mut()
+            && let Err(error) = renderer.update_instances(&frame.instances())
+        {
+            error!(%error, "failed to hot-reload shadow instances from ECS objects");
+        }
         let camera = frame.camera.unwrap_or_else(|| {
             warn!("ECS scene produced no camera; using the renderer default");
             Camera::default()

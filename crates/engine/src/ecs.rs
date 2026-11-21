@@ -8,7 +8,7 @@
 
 use bevy_ecs::prelude::*;
 
-use crate::render::{Camera, DirectionalLight};
+use crate::render::{Camera, DirectionalLight, Instance};
 use crate::scene::{Camera as EcsCamera, Light, Object};
 
 /// Per-frame render inputs extracted from the ECS world.
@@ -26,6 +26,21 @@ pub struct SceneState {
     pub camera: Option<Camera>,
     pub light: Option<DirectionalLight>,
     pub objects: Vec<Object>,
+}
+
+/// Maps scene entities to the render instance layout. `Object` and
+/// `Instance` share the same field layout, so this is a lossless copy of the
+/// poses the renderer draws.
+pub fn instances_from_objects(objects: &[Object]) -> Vec<Instance> {
+    objects
+        .iter()
+        .map(|object| Instance {
+            model: object.model.to_cols_array_2d(),
+            previous_model: object.previous_model.to_cols_array_2d(),
+            base_color: object.base_color.to_array(),
+            material: object.material.to_array(),
+        })
+        .collect()
 }
 
 /// Owns the ECS scene and the schedule that extracts render inputs from it.
@@ -63,6 +78,13 @@ impl EcsScene {
 impl Default for EcsScene {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SceneFrame {
+    /// Scene instances in render form; used by the shadow-pass bridge.
+    pub fn instances(&self) -> Vec<Instance> {
+        instances_from_objects(&self.objects)
     }
 }
 
@@ -115,5 +137,31 @@ mod tests {
         assert!(frame.camera.is_none());
         assert!(frame.light.is_none());
         assert!(frame.objects.is_empty());
+    }
+
+    #[test]
+    fn instances_from_objects_maps_pose_color_and_material() {
+        use crate::core::math::{Mat4, Vec3, Vec4};
+        let object = Object {
+            model: Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+            previous_model: Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0)),
+            base_color: Vec4::new(0.1, 0.2, 0.3, 1.0),
+            material: Vec4::new(0.5, 0.6, 0.7, 0.8),
+        };
+        let instances = instances_from_objects(&[object]);
+        assert_eq!(instances.len(), 1);
+        let instance = &instances[0];
+        assert_eq!(instance.model[3][0], 1.0);
+        assert_eq!(instance.model[3][1], 2.0);
+        assert_eq!(instance.model[3][2], 3.0);
+        assert_eq!(instance.previous_model[3][0], 4.0);
+        assert_eq!(instance.previous_model[3][1], 5.0);
+        assert_eq!(instance.base_color, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(instance.material, [0.5, 0.6, 0.7, 0.8]);
+
+        let mut scene = EcsScene::new();
+        scene.world().spawn((object,));
+        let frame = scene.run();
+        assert_eq!(frame.instances().len(), 1);
     }
 }
