@@ -1,5 +1,9 @@
 # ADR 0003 — TAA disabled in the M1 runtime
 
+> Historical decision. The "TAA" in this document is the original M1 blend that
+> was disabled; it is not the shipping path. HBTR (ADR 0005) supersedes it, and
+> all shipping code names the resolver `hbtr`, never `taa`.
+
 - **Status:** Superseded by [ADR 0005](0005-hbtr.md) — HBD Temporal Resolve is now the default AA path.
 - **Date:** 2026-11-20
 - **Supersedes:** none

@@ -14,7 +14,7 @@ The shared grammar is: **jitter → reproject → validate/rectify history → b
 
 ## HBD's own variant
 
-HBTR is implemented in `crates/render/src/taa_resolve.wgsl`. It is not a copy of any engine's shader. Its distinctive pieces:
+HBTR is implemented in `crates/render/src/hbtr_resolve.wgsl`. It is not a copy of any engine's shader. Its distinctive pieces:
 
 1. **Single-pass 3×3 YCoCg moment analysis.** One neighborhood loop yields mean and variance for clipping *and* the average used for sharpening — no extra fetches for contrast recovery.
 2. **Variance box + segment clipping.** History is clipped to `mean ± σ` intersected with the true neighborhood min/max, in YCoCg, by intersecting the segment from the neighborhood mean to the history color with the box (no corner accumulation).

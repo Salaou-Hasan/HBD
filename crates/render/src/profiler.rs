@@ -17,7 +17,7 @@ use crate::RenderError;
 
 /// Order matches the timestamp markers written into each command buffer.
 pub(crate) const PASS_NAMES: [&str; 8] = [
-    "shadow", "geometry", "taa", "ssao", "bloom", "tonemap", "other", "frame",
+    "shadow", "geometry", "hbtr", "ssao", "bloom", "tonemap", "other", "frame",
 ];
 const MARKERS: usize = PASS_NAMES.len();
 pub(crate) const FRAME_SLOTS: usize = 8;

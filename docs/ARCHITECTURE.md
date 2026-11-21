@@ -49,7 +49,7 @@ Internal crates depend downward only. `hbd-render` depends on `hbd-gfx` and `hbd
 
 - `hbd-platform` runs the `winit` event loop. `on_window_created` builds the Vulkan context and renderer; `on_redraw` updates the camera and calls `Renderer::render`.
 - GPU work is submitted from the event-loop thread. `VulkanContext::render` waits the in-flight fence for the current frame, acquires the swapchain image, records geometry/post passes, then presents.
-- `MAX_FRAMES_IN_FLIGHT = 2`; the swapchain has 3 images, so each image has its own HDR/depth target, TAA history pair, and descriptor set.
+- `MAX_FRAMES_IN_FLIGHT = 2`; the swapchain has 3 images, so each image has its own HDR/depth target, HBTR history pair, and descriptor set.
 - `Time` provides elapsed/delta; `WindowConfig::max_frames` is a test-only exit condition.
 
 ### Planned
@@ -71,7 +71,7 @@ HDR geometry pass (R16G16B16A16_SFLOAT + depth, per swapchain image)
         │  instanced PBR cubes, procedural sky, analytic IBL
         ├──────────────► depth ──► SSAO (half res)
         ▼
-TAA resolve (HBTR) ──► bloom (half res)
+HBTR resolve (HBTR) ──► bloom (half res)
         │                                  │
         └────────► tonemap (AgX) ◄─────────┘
                        │
@@ -79,7 +79,7 @@ TAA resolve (HBTR) ──► bloom (half res)
                  swapchain (sRGB)
 ```
 
-Bloom and tonemap bind the TAA-resolved views. The explicit switch is `TAA_ENABLED` in `crates/render/src/renderer.rs` (currently enabled). Details in [RENDERER.md](RENDERER.md) and [ANTI-ALIASING.md](ANTI-ALIASING.md).
+Bloom and tonemap bind the HBTR-resolved views. The explicit switch is `HBTR_ENABLED` in `crates/render/src/renderer.rs` (currently enabled). Details in [RENDERER.md](RENDERER.md) and [ANTI-ALIASING.md](ANTI-ALIASING.md).
 
 ## Shader authoring
 
@@ -91,7 +91,7 @@ Bloom and tonemap bind the TAA-resolved views. The explicit switch is `TAA_ENABL
 
 - `hbd-gfx` wraps Vulkan buffers/images in RAII types that suballocate through `gpu-allocator` and free on drop. The allocator is destroyed before the device because it frees remaining blocks through that device.
 - One HDR color image and one depth image per swapchain image prevents frame N+1 from overwriting targets frame N is still presenting.
-- Uniform writes for the acquired image happen after its in-flight fence is waited on. This matters especially for TAA: each image carries its own reprojection pose because it is revisited every `image_count` frames, not every frame.
+- Uniform writes for the acquired image happen after its in-flight fence is waited on. This matters especially for HBTR: each image carries its own reprojection pose because it is revisited every `image_count` frames, not every frame.
 
 ## Subsystem designs (not yet implemented)
 
@@ -105,5 +105,5 @@ Bloom and tonemap bind the TAA-resolved views. The explicit switch is `TAA_ENABL
 
 - `VulkanContext::new` can leak partially created Vulkan objects on early failure.
 - `Renderer::resize` rebuilds all passes; it does not preserve resources if the swapchain format changes.
-- `TonemapPass` captures the TAA history views once at construction, so debug view 7 always samples its original slot.
+- `TonemapPass` captures the HBTR history views once at construction, so debug view 7 always samples its original slot.
 - No GPU timing, frame graph, or pipeline cache yet.

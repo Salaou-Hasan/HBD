@@ -26,12 +26,12 @@ The HDR color attachment ends in `SHADER_READ_ONLY_OPTIMAL`, so bloom and tonema
 ## Targets and frame synchronization
 
 - `MAX_FRAMES_IN_FLIGHT = 2`, 3 swapchain images, FIFO present mode.
-- Per swapchain image: HDR color view, depth view, TAA resolved view, two TAA history views, SSAO view, bloom views, descriptor sets, and framebuffers.
+- Per swapchain image: HDR color view, depth view, HBTR resolved view, two HBTR history views, SSAO view, bloom views, descriptor sets, and framebuffers.
 - Uniform uploads for the acquired image occur after that frame's in-flight fence is signaled.
 
 ## Camera and jitter
 
-`Camera::new(position, target)` builds a perspective view/projection. When TAA is enabled, the projection is jittered by a Halton(2, 3) sub-pixel sequence and the resolve reprojects using the previous frame's view-projection matrix. The sandbox orbits the camera; `--static-camera` freezes it for stable comparisons.
+`Camera::new(position, target)` builds a perspective view/projection. When HBTR is enabled, the projection is jittered by a Halton(2, 3) sub-pixel sequence and the resolve reprojects using the previous frame's view-projection matrix. The sandbox orbits the camera; `--static-camera` freezes it for stable comparisons.
 
 ## Debug views
 
@@ -46,13 +46,13 @@ In the sandbox, press:
 | `4` | Ambient occlusion |
 | `5` | Depth |
 | `6` | Shadow cascade 0 |
-| `7` | TAA history |
+| `7` | HBTR history |
 
 `Renderer::set_debug_view(DebugView)` exposes the same modes through the engine API.
 
 ## Anti-aliasing: HBD Temporal Resolve
 
-`TAA_ENABLED = true` in `crates/render/src/renderer.rs`. HBTR jitters the camera, reprojects a per-image history, rectifies it with YCoCg variance clipping, applies a confidence-based blend and reuses the neighborhood mean for sharpening. Full design, cost, and limitations: [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md). The old disable decision is [ADR 0003](adr/0003-taa-disabled.md) (superseded).
+`HBTR_ENABLED = true` in `crates/render/src/renderer.rs`. HBTR jitters the camera, reprojects a per-image history, rectifies it with YCoCg variance clipping, applies a confidence-based blend and reuses the neighborhood mean for sharpening. Full design, cost, and limitations: [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md). The old disable decision is [ADR 0003](adr/0003-taa-disabled.md) (superseded).
 
 SSAO is additionally denoised in its own half-res bilateral pass, and AgX remains active.
 

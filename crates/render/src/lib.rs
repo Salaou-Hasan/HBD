@@ -95,7 +95,7 @@ pub enum DebugView {
     Depth,
     /// First directional shadow cascade.
     ShadowCascade,
-    /// TAA history buffer.
+    /// HBTR history buffer.
     TemporalHistory,
 }
 pub use renderer::Renderer;

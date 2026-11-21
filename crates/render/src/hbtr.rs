@@ -16,19 +16,19 @@ use crate::RenderError;
 use crate::render_targets::HDR_FORMAT;
 use crate::shader;
 
-const RESOLVE_WGSL: &str = include_str!("taa_resolve.wgsl");
+const RESOLVE_WGSL: &str = include_str!("hbtr_resolve.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
 const FRAGMENT_ENTRY: &CStr = c"fs_main";
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct TaaParams {
+struct HbtrParams {
     inverse_view_projection: [[f32; 4]; 4],
     previous_view_projection: [[f32; 4]; 4],
     settings: [f32; 4],
 }
 
-pub(crate) struct TaaPass {
+pub(crate) struct HbtrPass {
     device: ash::Device,
     _resolved_images: Vec<GpuImage>,
     _history_images: Vec<GpuImage>,
@@ -56,7 +56,7 @@ pub(crate) struct TaaPass {
     extent: vk::Extent2D,
 }
 
-impl TaaPass {
+impl HbtrPass {
     pub(crate) fn new(
         context: &VulkanContext,
         hdr_views: &[vk::ImageView],
@@ -114,11 +114,11 @@ impl TaaPass {
         let mut history_views = vec![Vec::with_capacity(2); image_count];
 
         for history_slot in history_views.iter_mut() {
-            let (image, view) = create_target("HBD TAA resolved")?;
+            let (image, view) = create_target("HBD HBTR resolved")?;
             resolved_images.push(image);
             resolved_views.push(view);
             for _ in 0..2 {
-                let (image, view) = create_target("HBD TAA history")?;
+                let (image, view) = create_target("HBD HBTR history")?;
                 history_images.push(image);
                 history_slot.push(view);
             }
@@ -280,10 +280,10 @@ impl TaaPass {
         let mut uniform_buffers = Vec::with_capacity(image_count);
         for _ in 0..image_count {
             uniform_buffers.push(context.create_buffer(
-                size_of::<TaaParams>() as u64,
+                size_of::<HbtrParams>() as u64,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
                 MemoryLocation::CpuToGpu,
-                "HBD TAA params",
+                "HBD HBTR params",
             )?);
         }
 
@@ -380,7 +380,7 @@ impl TaaPass {
         tracing::info!(
             width = extent.width,
             height = extent.height,
-            "TAA pass ready"
+            "HBTR pass ready"
         );
 
         let read_views = history_views.iter().map(|views| views[0]).collect();
@@ -428,7 +428,7 @@ impl TaaPass {
         let inverse = current_view_projection.inverse();
         let valid = self.initialized[index];
         let blend = if valid { 0.9 } else { 0.0 };
-        let params = TaaParams {
+        let params = HbtrParams {
             inverse_view_projection: inverse.to_cols_array_2d(),
             previous_view_projection: self.previous_view_projections[index].to_cols_array_2d(),
             settings: [
@@ -534,7 +534,7 @@ impl TaaPass {
     }
 }
 
-impl Drop for TaaPass {
+impl Drop for HbtrPass {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.resolve_pipeline, None);

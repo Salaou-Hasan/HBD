@@ -7,7 +7,7 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 1. **Rendering baseline before breadth.** A correct, stable lit frame precedes tooling, content, and scale.
 2. **Engine library first.** The editor is a consumer of `hbd-engine`; the engine never depends on it.
 3. **Measured, not assumed.** Performance claims require numbers from the target GPU class.
-4. **No silent default changes.** Rendering paths that are experimental (path tracing, TAA until proven) stay off by default and are covered by tests.
+4. **No silent default changes.** Rendering paths that are experimental (path tracing, HBTR until proven) stay off by default and are covered by tests.
 5. **Every visual feature has a debug view.** If a buffer cannot be inspected, it cannot be trusted.
 
 ---
@@ -44,7 +44,7 @@ This is a living plan. A milestone is done only when its exit criteria are met o
 
 **Deliberately not in the shipped M1 path**
 
-- **HBD Temporal Resolve (HBTR)** is the default AA path (YCoCg variance clipping, confidence blend, free sharpening), replacing the old disabled TAA. See [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md).
+- **HBD Temporal Resolve (HBTR)** is the default AA path (YCoCg variance clipping, confidence blend, free sharpening), replacing the old disabled HBTR. See [ANTI-ALIASING.md](ANTI-ALIASING.md) and [ADR 0005](adr/0005-hbtr.md).
 - Path tracing remains research-only and off by default, enforced by a unit test.
 
 **Exit criteria**
@@ -100,7 +100,7 @@ Remaining M2 work: the RTX 3060-class 1440p/60 gate (needs the target GPU) and t
 - Shadows track the mesh's live instances in real time (hot-reload). ✅ The shadow pass binds the same GPU-compacted per-image buffer and indirect draw count as the geometry pass, so culled/removed/animated entities no longer leave stale shadows. `Renderer::update_instances` overrides the shadow with live ECS entity poses when present; `hbd_engine::ecs::instances_from_objects` maps `Object` entities to `render::Instance`.
 - Clean, crisp image without SSAO film grain. ✅ `ssao.wgsl` uses a golden-angle hemisphere with interleaved-gradient rotation instead of a white-noise `fract(sin())` hash, and compares sampled scene depth against the actual hemisphere sample position (with the correct surface-normal orientation) instead of the centre pixel. The previous comparison reported depth discontinuities as occlusion and produced speckle on flat surfaces. AO radius/intensity are tuned to contact scale (0.7 / 0.75) so props keep their bright colours instead of being darkened by large-radius occlusion.
 - Changeable internal render resolution independent of the window size. ✅ `RendererConfig::resolution` / `Renderer::set_render_resolution` with native/1080p/1440p/2k/4k/custom presets; the sandbox exposes `--res` and F1–F5, with uncapped presentation by default and `--vsync` for A/B.
-- Resize/fullscreen never loses explicit settings or produces black TAA flicker. ✅ `RendererSettings` is the single source of truth for the cull A/B, instance count, debug view, HDR, light, pass cache, animation and live shadow instances; every pass rebuild re-applies it. A swapchain generation counter catches recreations that happen inside `VulkanContext::render` (suboptimal/out-of-date presents). HBTR carries an explicit per-image history-valid flag: freshly allocated/post-resize history is never sampled (an undefined sample poisoned the luminance-weighted resolve into black even with a zero blend), and luminance denominators are guarded against NaN.
+- Resize/fullscreen never loses explicit settings or produces black HBTR flicker. ✅ `RendererSettings` is the single source of truth for the cull A/B, instance count, debug view, HDR, light, pass cache, animation and live shadow instances; every pass rebuild re-applies it. A swapchain generation counter catches recreations that happen inside `VulkanContext::render` (suboptimal/out-of-date presents). HBTR carries an explicit per-image history-valid flag: freshly allocated/post-resize history is never sampled (an undefined sample poisoned the luminance-weighted resolve into black even with a zero blend), and luminance denominators are guarded against NaN.
 
 **Exit criteria:** 1440p/60 fps on RTX 3060-class with the scale targets enabled; no p99 regressions; HBTR passes the no-ghosting camera-pan test. **Open:** all three need the target GPU and a reference capture set; none can be closed on the Intel integrated dev GPU.
 

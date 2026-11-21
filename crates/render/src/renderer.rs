@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::bloom::BloomPass;
 use crate::camera::{Camera, DirectionalLight};
-use crate::hbtr::TaaPass;
+use crate::hbtr::HbtrPass;
 use crate::mesh::{Instance, MeshPass};
 use crate::profiler::{FRAME_SLOTS, Profiler};
 use crate::render_targets::RenderTargets;
@@ -24,7 +24,7 @@ const HBTR_ENABLED: bool = true;
 /// Timestamp marker indices. They must match the pass order in `PASS_NAMES`.
 const MARK_SHADOW: usize = 1;
 const MARK_GEOMETRY: usize = 2;
-const MARK_TAA: usize = 3;
+const MARK_HBTR: usize = 3;
 const MARK_SSAO: usize = 4;
 const MARK_BLOOM: usize = 5;
 const MARK_TONEMAP: usize = 6;
@@ -85,14 +85,14 @@ fn debug_view_mode(view: DebugView) -> u32 {
 }
 
 /// Owns the presentation context and the full
-/// shadow → HDR geometry → TAA → SSAO → bloom → tonemap pipeline.
+/// shadow → HDR geometry → HBTR → SSAO → bloom → tonemap pipeline.
 ///
 /// Field order matters: render resources are destroyed before `context` drops
 /// the device and allocator. Descriptor consumers are declared before the
 /// resources they reference.
 pub struct Renderer {
     tonemap: TonemapPass,
-    taa: TaaPass,
+    hbtr: HbtrPass,
     ssao: SsaoPass,
     bloom: BloomPass,
     mesh: MeshPass,
@@ -194,7 +194,7 @@ impl Renderer {
         )?;
         let (source, source_size, per_image, per_image_size) = mesh.shadow_instance_buffers();
         shadow.attach_mesh(source, source_size, &per_image, per_image_size);
-        let taa = TaaPass::new(
+        let hbtr = HbtrPass::new(
             &context,
             targets.hdr_views(),
             targets.depth_views(),
@@ -203,7 +203,7 @@ impl Renderer {
         )?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
-            taa.resolved_views()
+            hbtr.resolved_views()
         } else {
             targets.hdr_views()
         };
@@ -215,7 +215,7 @@ impl Renderer {
             ssao.denoised_views(),
             targets.depth_views(),
             shadow.views(),
-            taa.history_views(),
+            hbtr.history_views(),
         )?;
         let mut tonemap = tonemap;
         tonemap.set_hdr_enabled(hdr_enabled)?;
@@ -235,7 +235,7 @@ impl Renderer {
 
         Ok(Self {
             tonemap,
-            taa,
+            hbtr,
             ssao,
             bloom,
             mesh,
@@ -455,7 +455,7 @@ impl Renderer {
     fn rebuild_passes(&mut self) -> Result<(), RenderError> {
         let Self {
             tonemap,
-            taa,
+            hbtr,
             ssao,
             bloom,
             mesh,
@@ -519,7 +519,7 @@ impl Renderer {
             shadow_live = settings.shadow_live,
             "explicit renderer settings restored after resize"
         );
-        let new_taa = TaaPass::new(
+        let new_hbtr = HbtrPass::new(
             context,
             new_targets.hdr_views(),
             new_targets.depth_views(),
@@ -528,7 +528,7 @@ impl Renderer {
         )?;
         let new_ssao = SsaoPass::new(context, new_targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
-            new_taa.resolved_views()
+            new_hbtr.resolved_views()
         } else {
             new_targets.hdr_views()
         };
@@ -540,7 +540,7 @@ impl Renderer {
             new_ssao.denoised_views(),
             new_targets.depth_views(),
             new_shadow.views(),
-            new_taa.history_views(),
+            new_hbtr.history_views(),
         )?;
         let mut new_tonemap = new_tonemap;
         new_tonemap.set_hdr_enabled(settings.hdr_enabled)?;
@@ -548,7 +548,7 @@ impl Renderer {
 
         // Drop descriptor consumers before the resources they reference.
         *tonemap = new_tonemap;
-        *taa = new_taa;
+        *hbtr = new_hbtr;
         *ssao = new_ssao;
         *bloom = new_bloom;
         *mesh = new_mesh;
@@ -579,11 +579,11 @@ impl Renderer {
             self.rebuild_passes()?;
         }
 
-        // Destructure is split because `frame_index`/`taa` need mutable access
+        // Destructure is split because `frame_index`/`hbtr` need mutable access
         // while the other resources are only borrowed.
         let Self {
             tonemap,
-            taa,
+            hbtr,
             ssao,
             bloom,
             mesh,
@@ -651,7 +651,7 @@ impl Renderer {
         };
         let jittered_view_projection = camera.view_projection_with_jitter(aspect, jitter);
         let geometry_clear_values = targets.clear_values();
-        let mut taa_error: Option<RenderError> = None;
+        let mut hbtr_error: Option<RenderError> = None;
 
         if camera_unchanged {
             tracing::info!(
@@ -687,13 +687,13 @@ impl Renderer {
                         if let Some(slot_valid) = pass_valid.get_mut(image_index as usize) {
                             *slot_valid = true;
                         }
-                        // Write only the acquired image's TAA uniform, and do it
+                        // Write only the acquired image's HBTR uniform, and do it
                         // after its in-flight fence has been waited on.
                         if HBTR_ENABLED
                             && let Err(error) =
-                                taa.begin_frame(image_index, jittered_view_projection)
+                                hbtr.begin_frame(image_index, jittered_view_projection)
                         {
-                            taa_error = Some(error);
+                            hbtr_error = Some(error);
                             return;
                         }
                         // Per-image cull: compacted instances and the indirect
@@ -746,13 +746,13 @@ impl Renderer {
                     }
 
                     if HBTR_ENABLED && !reuse {
-                        taa.record(command_buffer, image_index);
+                        hbtr.record(command_buffer, image_index);
                         // Store the jittered pose: history samples were written
                         // with this exact projection, so reprojection must use it.
-                        taa.end_frame_for_index(jittered_view_projection, image_index);
+                        hbtr.end_frame_for_index(jittered_view_projection, image_index);
                     }
                     if let Some(active) = profiler.borrow_mut().as_mut() {
-                        active.mark(command_buffer, slot, MARK_TAA, frame_number);
+                        active.mark(command_buffer, slot, MARK_HBTR, frame_number);
                     }
 
                     if !reuse {
@@ -786,7 +786,7 @@ impl Renderer {
             }
         }
 
-        if let Some(error) = taa_error {
+        if let Some(error) = hbtr_error {
             return Err(error);
         }
 
