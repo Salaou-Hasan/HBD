@@ -64,7 +64,7 @@ The bottleneck was the presentation cap, not a render pass: with FIFO the CPU re
 
 `RendererConfig::resolution` and `Renderer::set_render_resolution` choose an internal resolution independent of the swapchain/window. All offscreen passes (geometry, HDR/velocity/depth, cluster/HZB, HBTR, SSAO, bloom) use that extent; the tonemap draw still uses the swapchain viewport and samples the resolved image with a linear filter, so the window size stays exactly as the user set it.
 
-Presets: `Native`, `P1080` (1920x1080), `P1440` (2560x1440), `P2K` (2048x1080 DCI), `P4K` (3840x2160), plus `Custom(w,h)`. Sandbox: `--res native|1080p|1440p|2k|4k`, or hotkeys **F1–F5** to switch live (each switch explicitly rebuilds passes and is logged).
+Presets: `Native`, `P1080` (1920x1080), `P1440` (2560x1440), `P2K` (2048x1080 DCI), `P4K` (3840x2160), `Custom(w,h)`, and `Auto(percent)` which tracks the live swapchain size on every resize. Sandbox: `--res native|1080p|1440p|2k|4k` or `--res WxH`, plus hotkeys **F1–F5** to switch live (each switch explicitly rebuilds passes and is logged). `--upscale` is the no-configuration option: it selects `Auto(50)` and overrides `--res`, so the engine renders at half the current window size. Verified: 640x360 internal at a 1280x720 window, and 1280x778 internal after maximizing to 2560x1555.
 
 Release build, Intel, 1280x720 window, uncapped, moving camera, 240 frames (fps samples at frame 120/240):
 

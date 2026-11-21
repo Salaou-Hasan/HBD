@@ -44,7 +44,7 @@ rejection and confidence blend as native HBTR. Tonemap presents at the window
 extent. This means an internal 640x360 render can drive a 1280x720 window with
 temporal reconstruction instead of a plain bilinear stretch.
 
-`RendererConfig::resolution` / `--res WxH` choose the internal size. The work
+`RendererConfig::resolution` / `--res WxH` choose the internal size, or use `--upscale` for automatic half-size rendering that follows the window through maximize/fullscreen. The work
 tier (`HbtrQuality`, `--quality low|medium|high|epic`) controls k-DOP planes,
 parallax taps and sharpening; Low keeps the original AABB clip and base sharpen
 so entry-level GPUs pay almost nothing extra. See [HBTR-DEVELOPMENT.md](HBTR-DEVELOPMENT.md)

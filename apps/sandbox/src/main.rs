@@ -408,6 +408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "taa" => Some(DebugView::TemporalHistory),
                 _ => None,
             });
+    let upscale = args.iter().any(|arg| arg == "--upscale");
     let render_resolution = args
         .windows(2)
         .find(|pair| pair[0] == "--res")
@@ -428,6 +429,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .unwrap_or_default();
+    // --upscale keeps the internal render size at half the live window size,
+    // including after maximize/fullscreen, with no manual resolution choice.
+    let render_resolution = if upscale {
+        RenderResolution::Auto(50)
+    } else {
+        render_resolution
+    };
     let instances = args
         .windows(2)
         .find(|pair| pair[0] == "--instances")
@@ -442,6 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         animate,
         uncapped,
         resolution = render_resolution.label(),
+        upscale,
         hbtr_tier = hbtr_quality.level(),
         ?debug_view,
         instances,

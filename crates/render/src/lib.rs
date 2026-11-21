@@ -44,6 +44,10 @@ pub enum RenderResolution {
     P4K,
     /// Explicit dimensions. Zero dimensions fall back to `Native`.
     Custom(u32, u32),
+    /// Render at a percentage of the current swapchain size, recomputed on
+    /// every resize so upscaling keeps working through fullscreen/size changes.
+    /// The value is an integer percent (1..=100).
+    Auto(u32),
 }
 
 impl RenderResolution {
@@ -56,6 +60,12 @@ impl RenderResolution {
             Self::P2K => (2048, 1080),
             Self::P4K => (3840, 2160),
             Self::Custom(width, height) => (width, height),
+            Self::Auto(percent) => {
+                let percent = percent.clamp(1, 100);
+                // Round to even pixels for API/driver friendliness.
+                let even = |value: u32| (value * percent / 100).div_ceil(2) * 2;
+                (even(native.width).max(2), even(native.height).max(2))
+            }
         };
         if width == 0 || height == 0 {
             native
@@ -73,6 +83,7 @@ impl RenderResolution {
             Self::P2K => "2k",
             Self::P4K => "4k",
             Self::Custom(_, _) => "custom",
+            Self::Auto(_) => "auto",
         }
     }
 }
@@ -265,5 +276,16 @@ mod tests {
             }
         );
         assert_eq!(RenderResolution::Custom(0, 0).extent(window), window);
+
+        let auto = RenderResolution::Auto(50).extent(window);
+        assert_eq!(auto.width, 640);
+        assert_eq!(auto.height, 360);
+        let fullscreen = vk::Extent2D {
+            width: 2560,
+            height: 1555,
+        };
+        let auto_fullscreen = RenderResolution::Auto(50).extent(fullscreen);
+        assert_eq!(auto_fullscreen.width, 1280);
+        assert_eq!(auto_fullscreen.height, 778);
     }
 }
