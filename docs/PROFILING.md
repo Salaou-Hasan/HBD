@@ -21,6 +21,7 @@ Flags:
 | `--profile-report <path>` | Write a CSV when the app shuts down. The write and row count are logged. |
 | `--profile-interval <n>` | Frames between percentile summaries (default 120). |
 | `--no-cache` | Force the full offscreen pipeline every frame; used as the A/B control. |
+| `--vsync` | Force FIFO presentation in the sandbox (display-locked A/B). Without it the sandbox opts into uncapped presentation. |
 
 Enable `RUST_LOG=debug` for per-marker logs; `info` (the default) already includes every skip, cache decision, toggle, and summary. The sandbox logs `E2E profiler requested via --profile` or `E2E profiler not requested; no GPU timestamps recorded` at startup so the mode is never ambiguous.
 
@@ -45,6 +46,19 @@ powershell -ExecutionPolicy Bypass -File tools/profile-check.ps1 `
 ```
 
 Those limits are the current Intel baseline plus margin. On the 82-cube orbit baseline (120 frames): GPU p50 **3.61 ms**, p99 **8.00 ms**; shadow p99 2.51, geometry 1.61, SSAO 1.66, bloom 0.50, tonemap 0.48 ms.
+
+### Presentation mode: the 120 fps ceiling (measured)
+
+`VulkanContext` exposes an explicit `PresentPolicy`: `Vsync` (engine default, tear-free FIFO) and `Uncapped` (MAILBOX when available, else IMMEDIATE). The chosen mode and the full supported-mode list are logged on every swapchain creation. The sandbox opts into `Uncapped` by default; pass `--vsync` for the display-locked comparison.
+
+Release build, Intel, 1280x720, moving camera, 600 frames:
+
+| Policy | FPS samples (every 120 frames) | GPU frame p50 | CPU render call p50 |
+|---|---|---|---|
+| `--vsync` (FIFO) | ~120 (display refresh cap) | 5.99 ms | 8.21 ms |
+| uncapped (IMMEDIATE) | **422 / 466 / 426 / 461 / 492** | **1.87 ms** | **1.93 ms** |
+
+The bottleneck was the presentation cap, not a render pass: with FIFO the CPU render call includes the wait for the previous frame's fence and present semaphore. Under IMMEDIATE the same passes cost shadow 0.17, geometry 0.39, TAA 0.50, SSAO 0.50, bloom 0.15, tonemap 0.16 ms (p50). MAILBOX is preferred when the driver exposes it: it is uncapped **and** tear-free. IMMEDIATE is only used with the explicit uncapped policy and may tear on displays without MAILBOX.
 
 ### 1M-instance stress scene
 

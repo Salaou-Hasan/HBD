@@ -104,10 +104,36 @@ pub struct VulkanContext {
     /// `0.0` means timestamp queries are unsupported; callers must check.
     timestamp_period: f32,
     timestamps_supported: bool,
+    /// Presentation policy restored on every swapchain (re)creation.
+    present_policy: PresentPolicy,
+}
+
+/// Presentation policy. `Vsync` is the default and never tears. `Uncapped`
+/// prefers MAILBOX when available, otherwise IMMEDIATE: it removes the refresh
+/// cap but may tear on displays without MAILBOX. Both are logged explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentPolicy {
+    #[default]
+    Vsync,
+    Uncapped,
 }
 
 impl VulkanContext {
     pub fn new<W>(window: &W, width: u32, height: u32) -> Result<Self, GfxError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + ?Sized,
+    {
+        Self::new_with_present_policy(window, width, height, PresentPolicy::Vsync)
+    }
+
+    /// Constructor with an explicit presentation policy. The engine and apps
+    /// must opt in to uncapped presentation; the default is vsync.
+    pub fn new_with_present_policy<W>(
+        window: &W,
+        width: u32,
+        height: u32,
+        present_policy: PresentPolicy,
+    ) -> Result<Self, GfxError>
     where
         W: HasWindowHandle + HasDisplayHandle + ?Sized,
     {
@@ -357,6 +383,7 @@ impl VulkanContext {
                 height,
                 timestamp_period,
                 timestamps_supported,
+                present_policy,
             };
 
             context.create_swapchain()?;
@@ -779,11 +806,12 @@ impl VulkanContext {
                 .get_physical_device_surface_present_modes(self.physical_device, self.surface)
                 .map_err(GfxError::Vulkan)?;
 
-            let present_mode = if present_modes.contains(&vk::PresentModeKHR::MAILBOX) {
-                vk::PresentModeKHR::MAILBOX
-            } else {
-                vk::PresentModeKHR::FIFO
-            };
+            let present_mode = choose_present_mode(&present_modes, self.present_policy);
+            info!(
+                modes = ?present_modes,
+                chosen = ?present_mode,
+                "swapchain present modes"
+            );
 
             let extent = if capabilities.current_extent.width != u32::MAX {
                 capabilities.current_extent
@@ -1060,6 +1088,23 @@ fn pick_physical_device(
     }
 }
 
+/// Chooses the presentation mode for a given surface and policy. Kept pure so
+/// the FPS behaviour can be regression-tested without a GPU.
+pub(crate) fn choose_present_mode(
+    modes: &[vk::PresentModeKHR],
+    policy: PresentPolicy,
+) -> vk::PresentModeKHR {
+    if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        // Tear-free and uncapped: always preferable when available.
+        vk::PresentModeKHR::MAILBOX
+    } else if policy == PresentPolicy::Uncapped && modes.contains(&vk::PresentModeKHR::IMMEDIATE) {
+        // Explicit opt-in: no refresh cap, but tearing is possible.
+        vk::PresentModeKHR::IMMEDIATE
+    } else {
+        vk::PresentModeKHR::FIFO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,5 +1112,40 @@ mod tests {
     #[test]
     fn formats_vulkan_versions() {
         assert_eq!(version_string(vk::make_api_version(0, 1, 2, 3)), "1.2.3");
+    }
+
+    #[test]
+    fn vsync_never_leaves_fifo_without_mailbox() {
+        let modes = [vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO];
+        assert_eq!(
+            choose_present_mode(&modes, PresentPolicy::Vsync),
+            vk::PresentModeKHR::FIFO
+        );
+    }
+
+    #[test]
+    fn uncapped_prefers_mailbox_over_immediate() {
+        let modes = [
+            vk::PresentModeKHR::IMMEDIATE,
+            vk::PresentModeKHR::FIFO,
+            vk::PresentModeKHR::MAILBOX,
+        ];
+        assert_eq!(
+            choose_present_mode(&modes, PresentPolicy::Uncapped),
+            vk::PresentModeKHR::MAILBOX
+        );
+    }
+
+    #[test]
+    fn uncapped_falls_back_to_immediate_then_fifo() {
+        let modes = [vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO];
+        assert_eq!(
+            choose_present_mode(&modes, PresentPolicy::Uncapped),
+            vk::PresentModeKHR::IMMEDIATE
+        );
+        assert_eq!(
+            choose_present_mode(&[vk::PresentModeKHR::FIFO], PresentPolicy::Uncapped),
+            vk::PresentModeKHR::FIFO
+        );
     }
 }

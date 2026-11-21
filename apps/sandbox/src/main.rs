@@ -28,6 +28,7 @@ struct Sandbox {
     no_cull: bool,
     cull_stats: bool,
     animate: bool,
+    uncapped: bool,
     instances: Option<u32>,
     fps_smoothed: f32,
 }
@@ -50,7 +51,17 @@ impl PlatformHandler for Sandbox {
             warn!("Vulkan probe failed: {error}");
         }
 
-        let context = match VulkanContext::new(&**window, size.width, size.height) {
+        let present_policy = if self.uncapped {
+            gfx::PresentPolicy::Uncapped
+        } else {
+            gfx::PresentPolicy::Vsync
+        };
+        let context = match VulkanContext::new_with_present_policy(
+            &**window,
+            size.width,
+            size.height,
+            present_policy,
+        ) {
             Ok(context) => context,
             Err(error) => {
                 error!("failed to initialize the Vulkan context: {error}");
@@ -327,6 +338,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_cull = args.iter().any(|arg| arg == "--no-cull");
     let cull_stats = args.iter().any(|arg| arg == "--cull-stats");
     let animate = args.iter().any(|arg| arg == "--animate");
+    // The sandbox is a performance validation app: run uncapped by default and
+    // expose --vsync for the display-locked A/B comparison.
+    let uncapped = !args.iter().any(|arg| arg == "--vsync");
     let instances = args
         .windows(2)
         .find(|pair| pair[0] == "--instances")
@@ -339,6 +353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         no_cull,
         cull_stats,
         animate,
+        uncapped,
         instances,
         "sandbox profiling configuration"
     );
@@ -389,6 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     no_cull,
                     cull_stats,
                     animate,
+                    uncapped,
                     instances,
                     fps_smoothed: 0.0,
                 },

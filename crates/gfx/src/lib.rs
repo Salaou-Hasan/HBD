@@ -8,7 +8,7 @@ pub mod context;
 pub mod memory;
 pub mod vulkan;
 
-pub use context::VulkanContext;
+pub use context::{PresentPolicy, VulkanContext};
 pub use gpu_allocator::MemoryLocation;
 pub use memory::{GpuBuffer, GpuImage, SharedAllocator};
 pub use vulkan::{GfxError, VulkanDeviceInfo, VulkanInfo, probe, version_string};
