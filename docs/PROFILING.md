@@ -60,6 +60,24 @@ Release build, Intel, 1280x720, moving camera, 600 frames:
 
 The bottleneck was the presentation cap, not a render pass: with FIFO the CPU render call includes the wait for the previous frame's fence and present semaphore. Under IMMEDIATE the same passes cost shadow 0.17, geometry 0.39, TAA 0.50, SSAO 0.50, bloom 0.15, tonemap 0.16 ms (p50). MAILBOX is preferred when the driver exposes it: it is uncapped **and** tear-free. IMMEDIATE is only used with the explicit uncapped policy and may tear on displays without MAILBOX.
 
+### Internal render resolution (the window never changes)
+
+`RendererConfig::resolution` and `Renderer::set_render_resolution` choose an internal resolution independent of the swapchain/window. All offscreen passes (geometry, HDR/velocity/depth, cluster/HZB, TAA, SSAO, bloom) use that extent; the tonemap draw still uses the swapchain viewport and samples the resolved image with a linear filter, so the window size stays exactly as the user set it.
+
+Presets: `Native`, `P1080` (1920x1080), `P1440` (2560x1440), `P2K` (2048x1080 DCI), `P4K` (3840x2160), plus `Custom(w,h)`. Sandbox: `--res native|1080p|1440p|2k|4k`, or hotkeys **F1–F5** to switch live (each switch explicitly rebuilds passes and is logged).
+
+Release build, Intel, 1280x720 window, uncapped, moving camera, 240 frames (fps samples at frame 120/240):
+
+| Internal resolution | FPS | Window |
+|---|---|---|
+| native (1280x720) | ~410–665 | 1280x720 |
+| 1080p | ~201–234 | 1280x720 |
+| 1440p | ~99–127 | 1280x720 |
+| 2k (2048x1080) | ~95 | 1280x720 |
+| 4k | ~60–63 | 1280x720 |
+
+This is the engine-wide quality/FPS knob: pick a preset above native to trade fragment cost for resolution while keeping the same display size, or keep `Native` for a lossless image.
+
 ### Fullscreen is pixel-bound, not capped
 
 Maximizing 1280x720 → 2560x1555 quadruples the fragment work. The present mode stays IMMEDIATE (verified in the log), and FPS settles at ~100–110 because the GPU frame is ~9.3 ms. Measured fullscreen p50 by pass: SSAO 2.20, TAA 2.06, geometry 1.74, bloom 0.75, tonemap 0.72, shadow 0.35 ms. The TAA resolve and its history copy are now a **single draw with two color attachments** (same output pixels, one less full-screen pass): TAA 2.46 → 2.06 ms, total 9.69 → 9.28 ms. Further gains at this resolution require either a faster GPU or an explicit render-scale/quality tradeoff; rendering at full swapchain resolution is deliberately kept lossless.

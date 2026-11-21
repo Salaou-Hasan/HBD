@@ -7,7 +7,7 @@ use hbd_engine::ecs::EcsScene;
 use hbd_engine::gfx;
 use hbd_engine::gfx::VulkanContext;
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
-use hbd_engine::render::{Camera, DebugView, Renderer, RendererConfig};
+use hbd_engine::render::{Camera, DebugView, RenderResolution, Renderer, RendererConfig};
 use hbd_engine::scene::{Camera as EcsCamera, Entity, Light as EcsLight};
 use tracing::{error, info, warn};
 use winit::event::{ElementState, WindowEvent};
@@ -29,6 +29,7 @@ struct Sandbox {
     cull_stats: bool,
     animate: bool,
     uncapped: bool,
+    render_resolution: RenderResolution,
     instances: Option<u32>,
     fps_smoothed: f32,
 }
@@ -106,6 +107,16 @@ impl PlatformHandler for Sandbox {
                     renderer.set_object_animation(true);
                     info!("object animation requested via --animate");
                 }
+                if let Err(error) = renderer.set_render_resolution(self.render_resolution) {
+                    error!(%error, "failed to set render resolution");
+                } else {
+                    info!(
+                        resolution = self.render_resolution.label(),
+                        internal = ?renderer.render_extent(),
+                        window = ?renderer.swapchain_extent(),
+                        "render resolution applied"
+                    );
+                }
                 if let Some(count) = self.instances
                     && let Err(error) = renderer.set_instance_count(count)
                 {
@@ -169,6 +180,26 @@ impl PlatformHandler for Sandbox {
                             error!("failed to set debug view: {error}");
                         } else {
                             info!(?view, "debug view");
+                        }
+                    }
+                    let resolution = match code {
+                        KeyCode::F1 => Some(RenderResolution::Native),
+                        KeyCode::F2 => Some(RenderResolution::P1080),
+                        KeyCode::F3 => Some(RenderResolution::P1440),
+                        KeyCode::F4 => Some(RenderResolution::P2K),
+                        KeyCode::F5 => Some(RenderResolution::P4K),
+                        _ => None,
+                    };
+                    if let Some(resolution) = resolution {
+                        let result = self
+                            .renderer
+                            .as_mut()
+                            .map(|renderer| renderer.set_render_resolution(resolution));
+                        if let Some(Err(error)) = result {
+                            error!(%error, "failed to change render resolution");
+                        } else {
+                            info!(resolution = resolution.label(), "render resolution hotkey");
+                            self.render_resolution = resolution;
                         }
                     }
                 }
@@ -341,6 +372,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The sandbox is a performance validation app: run uncapped by default and
     // expose --vsync for the display-locked A/B comparison.
     let uncapped = !args.iter().any(|arg| arg == "--vsync");
+    let render_resolution = args
+        .windows(2)
+        .find(|pair| pair[0] == "--res")
+        .and_then(|pair| match pair[1].to_ascii_lowercase().as_str() {
+            "native" => Some(RenderResolution::Native),
+            "1080p" => Some(RenderResolution::P1080),
+            "1440p" => Some(RenderResolution::P1440),
+            "2k" => Some(RenderResolution::P2K),
+            "4k" => Some(RenderResolution::P4K),
+            _ => None,
+        })
+        .unwrap_or_default();
     let instances = args
         .windows(2)
         .find(|pair| pair[0] == "--instances")
@@ -354,6 +397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cull_stats,
         animate,
         uncapped,
+        resolution = render_resolution.label(),
         instances,
         "sandbox profiling configuration"
     );
@@ -405,6 +449,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cull_stats,
                     animate,
                     uncapped,
+                    render_resolution,
                     instances,
                     fps_smoothed: 0.0,
                 },

@@ -16,7 +16,7 @@ use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
 use crate::ssao::SsaoPass;
 use crate::tonemap::TonemapPass;
-use crate::{DebugView, RenderError, RendererConfig};
+use crate::{DebugView, RenderError, RenderResolution, RendererConfig};
 
 /// HBD Temporal Resolve (HBTR) is the default AA path. See `docs/ANTI-ALIASING.md`.
 const HBTR_ENABLED: bool = true;
@@ -40,6 +40,8 @@ const MARK_FRAME_END: usize = 7;
 struct RendererSettings {
     cull_enabled: bool,
     instance_count: Option<u32>,
+    /// Internal render resolution, independent of the swapchain window size.
+    resolution: RenderResolution,
     light: DirectionalLight,
     hdr_enabled: bool,
     debug_view: DebugView,
@@ -51,10 +53,11 @@ struct RendererSettings {
 }
 
 impl RendererSettings {
-    fn new(instance_count: Option<u32>, hdr_enabled: bool) -> Self {
+    fn new(instance_count: Option<u32>, hdr_enabled: bool, resolution: RenderResolution) -> Self {
         Self {
             cull_enabled: true,
             instance_count,
+            resolution,
             light: DirectionalLight::default(),
             hdr_enabled,
             debug_view: DebugView::default(),
@@ -117,7 +120,8 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(context: VulkanContext) -> Result<Self, RenderError> {
-        Self::create(context, None, None, RendererConfig::default().hdr)
+        let config = RendererConfig::default();
+        Self::create(context, None, None, config.hdr, config.resolution)
     }
 
     /// Early-validation hook: render a single OBJ instead of the cube grid.
@@ -126,11 +130,13 @@ impl Renderer {
         context: VulkanContext,
         obj_path: impl AsRef<Path>,
     ) -> Result<Self, RenderError> {
+        let config = RendererConfig::default();
         Self::create(
             context,
             Some(obj_path.as_ref().to_path_buf()),
             None,
-            RendererConfig::default().hdr,
+            config.hdr,
+            config.resolution,
         )
     }
 
@@ -139,7 +145,8 @@ impl Renderer {
         context: VulkanContext,
         count: u32,
     ) -> Result<Self, RenderError> {
-        Self::create(context, None, Some(count), RendererConfig::default().hdr)
+        let config = RendererConfig::default();
+        Self::create(context, None, Some(count), config.hdr, config.resolution)
     }
 
     /// Constructs the renderer from the public config. `hdr: false` presents
@@ -148,7 +155,7 @@ impl Renderer {
         context: VulkanContext,
         config: RendererConfig,
     ) -> Result<Self, RenderError> {
-        Self::create(context, None, None, config.hdr)
+        Self::create(context, None, None, config.hdr, config.resolution)
     }
 
     fn create(
@@ -156,11 +163,21 @@ impl Renderer {
         obj_path: Option<PathBuf>,
         instance_count: Option<u32>,
         hdr_enabled: bool,
+        resolution: RenderResolution,
     ) -> Result<Self, RenderError> {
-        let extent = context.swapchain_extent();
+        let swapchain_extent = context.swapchain_extent();
+        let extent = resolution.extent(swapchain_extent);
         let image_count = context.swapchain_image_views().len();
         let light = DirectionalLight::default();
-        let settings = RendererSettings::new(instance_count, hdr_enabled);
+        let settings = RendererSettings::new(instance_count, hdr_enabled, resolution);
+        info!(
+            resolution = resolution.label(),
+            width = extent.width,
+            height = extent.height,
+            window_width = swapchain_extent.width,
+            window_height = swapchain_extent.height,
+            "internal render resolution selected"
+        );
 
         let targets = RenderTargets::new(&context, extent, image_count)?;
         let mut shadow = ShadowPass::new(&context, &light)?;
@@ -338,6 +355,37 @@ impl Renderer {
         }
     }
 
+    /// Changes the internal render resolution and rebuilds every pass. The
+    /// window and swapchain are untouched: the tonemap pass upscales the
+    /// resolved image into the presentation target with a linear filter.
+    pub fn set_render_resolution(
+        &mut self,
+        resolution: RenderResolution,
+    ) -> Result<(), RenderError> {
+        if self.settings.resolution == resolution {
+            info!(
+                resolution = resolution.label(),
+                "render resolution unchanged"
+            );
+            return Ok(());
+        }
+        self.settings.resolution = resolution;
+        self.last_view_projection = None;
+        self.pass_valid.fill(false);
+        info!(
+            resolution = resolution.label(),
+            "internal render resolution changing"
+        );
+        self.rebuild_passes()
+    }
+
+    /// Extent of the internal render targets (may differ from the window).
+    pub fn render_extent(&self) -> vk::Extent2D {
+        self.settings
+            .resolution
+            .extent(self.context.swapchain_extent())
+    }
+
     /// Explicit instance-count override for GPU-throughput testing. Stored in
     /// the settings so a resize rebuilds the same instance scene.
     pub fn set_instance_count(&mut self, count: u32) -> Result<(), RenderError> {
@@ -425,9 +473,18 @@ impl Renderer {
             swapchain_generation: _,
             last_image_index: _,
         } = self;
-        let extent = context.swapchain_extent();
+        let swapchain_extent = context.swapchain_extent();
+        let extent = settings.resolution.extent(swapchain_extent);
         let image_count = context.swapchain_image_views().len();
         let light = settings.light;
+        info!(
+            resolution = settings.resolution.label(),
+            width = extent.width,
+            height = extent.height,
+            window_width = swapchain_extent.width,
+            window_height = swapchain_extent.height,
+            "rebuilding passes at internal render resolution"
+        );
 
         let new_targets = RenderTargets::new(context, extent, image_count)?;
         let mut new_shadow = ShadowPass::new(context, &light)?;
@@ -544,8 +601,9 @@ impl Renderer {
             swapchain_generation: _,
             last_image_index,
         } = self;
-        let extent = context.swapchain_extent();
-        let aspect = extent.width as f32 / extent.height.max(1) as f32;
+        let swapchain_extent = context.swapchain_extent();
+        let render_extent = settings.resolution.extent(swapchain_extent);
+        let aspect = render_extent.width as f32 / render_extent.height.max(1) as f32;
         let light = settings.light;
         let frame_number = *frame_index;
         let slot = (frame_number % FRAME_SLOTS as u64) as usize;
@@ -585,8 +643,8 @@ impl Renderer {
 
         let jitter = if HBTR_ENABLED {
             Vec2::new(
-                (halton(*frame_index + 1, 2) - 0.5) * 2.0 / extent.width as f32,
-                (halton(*frame_index + 1, 3) - 0.5) * 2.0 / extent.height as f32,
+                (halton(*frame_index + 1, 2) - 0.5) * 2.0 / render_extent.width as f32,
+                (halton(*frame_index + 1, 3) - 0.5) * 2.0 / render_extent.height as f32,
             )
         } else {
             Vec2::ZERO
@@ -608,7 +666,7 @@ impl Renderer {
         context
             .render(
                 clear_color,
-                |device, command_buffer, image_index, extent| {
+                |device, command_buffer, image_index, _present_extent| {
                     *last_image_index = image_index;
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.begin_frame(command_buffer, slot, frame_number);
@@ -667,7 +725,7 @@ impl Renderer {
                             .framebuffer(targets.framebuffer(image_index))
                             .render_area(vk::Rect2D {
                                 offset: vk::Offset2D { x: 0, y: 0 },
-                                extent,
+                                extent: render_extent,
                             })
                             .clear_values(&geometry_clear_values);
 
@@ -678,7 +736,7 @@ impl Renderer {
                                 vk::SubpassContents::INLINE,
                             );
                         }
-                        mesh.record(command_buffer, extent, image_index);
+                        mesh.record(command_buffer, render_extent, image_index);
                         unsafe {
                             device.cmd_end_render_pass(command_buffer);
                         }
@@ -772,12 +830,13 @@ mod tests {
 
     #[test]
     fn explicit_settings_are_defaulted_and_survive_cloning() {
-        let mut settings = RendererSettings::new(Some(4000), false);
+        let mut settings = RendererSettings::new(Some(4000), false, RenderResolution::P1080);
         assert!(settings.cull_enabled);
         assert!(settings.pass_cache_enabled);
         assert!(!settings.hdr_enabled);
         assert_eq!(settings.instance_count, Some(4000));
         assert_eq!(settings.debug_view, DebugView::Final);
+        assert_eq!(settings.resolution, RenderResolution::P1080);
 
         settings.cull_enabled = false;
         settings.instance_count = Some(8000);
@@ -796,6 +855,7 @@ mod tests {
         assert_eq!(restored.instance_count, Some(8000));
         assert_eq!(debug_view_mode(restored.debug_view), 6);
         assert_eq!(debug_view_mode(DebugView::Final), 0);
+        assert_eq!(restored.resolution, RenderResolution::P1080);
         assert!(restored.shadow_live);
         assert_eq!(restored.shadow_instances.len(), 1);
     }
