@@ -90,6 +90,10 @@ pub struct VulkanContext {
     swapchain_extent: vk::Extent2D,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
+    /// Incremented on every swapchain (re)creation, including the implicit
+    /// recreations triggered by `ERROR_OUT_OF_DATE_KHR`/suboptimal presents.
+    /// Consumers use this to know when their per-image resources are stale.
+    swapchain_generation: u64,
     render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
@@ -343,6 +347,7 @@ impl VulkanContext {
                 swapchain_extent: vk::Extent2D::default(),
                 swapchain_images: Vec::new(),
                 swapchain_image_views: Vec::new(),
+                swapchain_generation: 0,
                 render_pass: vk::RenderPass::null(),
                 framebuffers: Vec::new(),
                 command_pool,
@@ -646,6 +651,12 @@ impl VulkanContext {
         &self.swapchain_image_views
     }
 
+    /// Monotonic counter for swapchain recreation. Render passes bound to
+    /// per-image views must be rebuilt whenever this changes.
+    pub fn swapchain_generation(&self) -> u64 {
+        self.swapchain_generation
+    }
+
     pub fn swapchain_format(&self) -> vk::Format {
         self.swapchain_format
     }
@@ -918,6 +929,7 @@ impl VulkanContext {
 
             self.swapchain_format = format.format;
             self.swapchain_extent = extent;
+            self.swapchain_generation += 1;
 
             info!(
                 format = ?format.format,

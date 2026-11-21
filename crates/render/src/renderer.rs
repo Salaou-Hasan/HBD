@@ -30,6 +30,57 @@ const MARK_BLOOM: usize = 5;
 const MARK_TONEMAP: usize = 6;
 const MARK_FRAME_END: usize = 7;
 
+/// Explicit, user-driven renderer settings.
+///
+/// Passes are destroyed and rebuilt on resize. This struct is the single
+/// source of truth for every explicit override, and `resize` re-applies it to
+/// the fresh passes. Adding a new toggle here plus `apply_settings` prevents
+/// it from being silently reset when the window changes size.
+#[derive(Debug, Clone)]
+struct RendererSettings {
+    cull_enabled: bool,
+    instance_count: Option<u32>,
+    light: DirectionalLight,
+    hdr_enabled: bool,
+    debug_view: DebugView,
+    object_animation: bool,
+    pass_cache_enabled: bool,
+    shadow_live: bool,
+    /// Last live entity poses, replayed into the rebuilt shadow pass.
+    shadow_instances: Vec<Instance>,
+}
+
+impl RendererSettings {
+    fn new(instance_count: Option<u32>, hdr_enabled: bool) -> Self {
+        Self {
+            cull_enabled: true,
+            instance_count,
+            light: DirectionalLight::default(),
+            hdr_enabled,
+            debug_view: DebugView::default(),
+            object_animation: false,
+            pass_cache_enabled: true,
+            shadow_live: false,
+            shadow_instances: Vec::new(),
+        }
+    }
+}
+
+/// Tonemap debug mode for a `DebugView`. Kept in one place so `set_debug_view`
+/// and the post-resize restore cannot disagree.
+fn debug_view_mode(view: DebugView) -> u32 {
+    match view {
+        DebugView::Final => 0,
+        DebugView::Filmic => 1,
+        DebugView::Hdr => 2,
+        DebugView::Bloom => 3,
+        DebugView::AmbientOcclusion => 4,
+        DebugView::Depth => 5,
+        DebugView::ShadowCascade => 6,
+        DebugView::TemporalHistory => 7,
+    }
+}
+
 /// Owns the presentation context and the full
 /// shadow → HDR geometry → TAA → SSAO → bloom → tonemap pipeline.
 ///
@@ -51,23 +102,15 @@ pub struct Renderer {
     /// bit-identical to the pose that produced a given image's cached passes.
     last_view_projection: Option<Mat4>,
     pass_valid: Vec<bool>,
-    pass_cache_enabled: bool,
     cached_frames: u64,
     full_frames: u64,
     /// Temporary early-visualization override; not part of the asset pipeline.
     obj_path: Option<PathBuf>,
-    instance_count: Option<u32>,
-    /// Directional light used by geometry and shadows. Set explicitly by the
-    /// engine's ECS scene bridge; defaults to the M1 light.
-    light: DirectionalLight,
-    /// Active presentation path, driven by `RendererConfig::hdr`.
-    hdr_enabled: bool,
-    /// Demo object animation; only meaningful while culling is enabled because
-    /// it rewrites the compacted per-image buffers.
-    object_animation: bool,
-    /// When live ECS instances are present the shadow pass draws its own
-    /// host-written buffer; otherwise it follows the mesh's culled instances.
-    shadow_live: bool,
+    /// All explicit overrides, restored after every pass rebuild.
+    settings: RendererSettings,
+    /// Swapchain generation observed when the passes were last built. Any
+    /// recreation (including implicit suboptimal presents) invalidates them.
+    swapchain_generation: u64,
     /// Last presented image; used only by the explicit cull-stats readback.
     last_image_index: u32,
 }
@@ -117,6 +160,7 @@ impl Renderer {
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
         let light = DirectionalLight::default();
+        let settings = RendererSettings::new(instance_count, hdr_enabled);
 
         let targets = RenderTargets::new(&context, extent, image_count)?;
         let mut shadow = ShadowPass::new(&context, &light)?;
@@ -170,6 +214,7 @@ impl Renderer {
             targets = image_count,
             "HDR geometry targets ready"
         );
+        let swapchain_generation = context.swapchain_generation();
 
         Ok(Self {
             tonemap,
@@ -184,15 +229,11 @@ impl Renderer {
             frame_index: 0,
             last_view_projection: None,
             pass_valid: vec![false; image_count],
-            pass_cache_enabled: true,
             cached_frames: 0,
             full_frames: 0,
             obj_path,
-            instance_count,
-            light,
-            hdr_enabled,
-            object_animation: false,
-            shadow_live: false,
+            settings,
+            swapchain_generation,
             last_image_index: 0,
         })
     }
@@ -200,6 +241,7 @@ impl Renderer {
     /// Explicit A/B switch for GPU frustum culling. Toggling invalidates the
     /// pass cache so the next frame re-culls with the new setting.
     pub fn set_culling_enabled(&mut self, enabled: bool) {
+        self.settings.cull_enabled = enabled;
         self.mesh.set_culling_enabled(enabled);
         self.last_view_projection = None;
         self.pass_valid.fill(false);
@@ -210,19 +252,18 @@ impl Renderer {
     /// pass writes the compacted buffers, so it requires culling and it
     /// invalidates the static-camera pass cache.
     pub fn set_object_animation(&mut self, enabled: bool) {
-        self.object_animation = enabled && self.cull_enabled();
-        if enabled && !self.cull_enabled() {
+        self.settings.object_animation = enabled && self.settings.cull_enabled;
+        if enabled && !self.settings.cull_enabled {
             info!("object animation requires culling; staying static");
         }
         if enabled {
             self.last_view_projection = None;
             self.pass_valid.fill(false);
         }
-        info!(enabled = self.object_animation, "object animation toggled");
-    }
-
-    fn cull_enabled(&self) -> bool {
-        self.mesh.culling_enabled()
+        info!(
+            enabled = self.settings.object_animation,
+            "object animation toggled"
+        );
     }
 
     /// Explicit, stalled readback of the last culled count. Returns
@@ -253,7 +294,7 @@ impl Renderer {
     /// Explicit presentation-path switch. Mirrors `RendererConfig::hdr`.
     pub fn set_hdr_enabled(&mut self, enabled: bool) -> Result<(), RenderError> {
         self.tonemap.set_hdr_enabled(enabled)?;
-        self.hdr_enabled = enabled;
+        self.settings.hdr_enabled = enabled;
         info!(hdr = enabled, "presentation path explicitly changed");
         Ok(())
     }
@@ -263,7 +304,7 @@ impl Renderer {
     /// geometry/shading uniform from the next frame onward.
     pub fn set_light(&mut self, light: DirectionalLight) {
         info!(direction = ?light.direction, intensity = light.intensity, "directional light override applied");
-        self.light = light;
+        self.settings.light = light;
     }
 
     /// Replaces the instance data the shadow pass draws, hot-reloading the
@@ -277,16 +318,19 @@ impl Renderer {
             self.last_view_projection = None;
             self.pass_valid.fill(false);
             tracing::info!(count = instances.len(), "shadow instances hot-reloaded");
+            self.settings.shadow_instances = instances.to_vec();
+        } else {
+            self.settings.shadow_instances.clear();
         }
-        self.shadow_live = live;
+        self.settings.shadow_live = live;
         Ok(())
     }
 
     /// Explicit A/B switch for the offscreen-pass cache. Always logged.
     pub fn set_pass_cache_enabled(&mut self, enabled: bool) {
-        if self.pass_cache_enabled != enabled {
+        if self.settings.pass_cache_enabled != enabled {
             tracing::info!(enabled, "offscreen pass cache toggled; cache invalidated");
-            self.pass_cache_enabled = enabled;
+            self.settings.pass_cache_enabled = enabled;
             self.last_view_projection = None;
             self.pass_valid.fill(false);
         } else {
@@ -294,8 +338,10 @@ impl Renderer {
         }
     }
 
-    /// Explicit instance-count override for GPU-throughput testing.
+    /// Explicit instance-count override for GPU-throughput testing. Stored in
+    /// the settings so a resize rebuilds the same instance scene.
     pub fn set_instance_count(&mut self, count: u32) -> Result<(), RenderError> {
+        self.settings.instance_count = Some(count);
         self.mesh.set_instance_count(count)?;
         tracing::info!(
             count,
@@ -329,22 +375,36 @@ impl Renderer {
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         let before = self.context.swapchain_extent();
+        let generation_before = self.context.swapchain_generation();
         self.context.resize(width, height)?;
         let after = self.context.swapchain_extent();
-        if before.width == after.width && before.height == after.height {
+        let generation_after = self.context.swapchain_generation();
+        if generation_before == generation_after
+            && before.width == after.width
+            && before.height == after.height
+        {
             tracing::info!(
                 width,
                 height,
-                "resize ignored: swapchain extent unchanged (no pass rebuild)"
+                "resize ignored: swapchain unchanged (no pass rebuild)"
             );
             return Ok(());
         }
         tracing::info!(
             ?before,
             ?after,
-            "resize accepted: rebuilding all render passes"
+            generation_before,
+            generation_after,
+            "swapchain changed: rebuilding all render passes"
         );
+        self.swapchain_generation = generation_after;
+        self.rebuild_passes()
+    }
 
+    /// Rebuilds every pass against the current swapchain and restores all
+    /// explicit settings. Called from `resize` and whenever the swapchain was
+    /// recreated outside a resize event.
+    fn rebuild_passes(&mut self) -> Result<(), RenderError> {
         let Self {
             tonemap,
             taa,
@@ -358,36 +418,50 @@ impl Renderer {
             frame_index: _,
             last_view_projection,
             pass_valid,
-            pass_cache_enabled: _,
             cached_frames: _,
             full_frames: _,
             obj_path,
-            instance_count,
-            light,
-            hdr_enabled,
-            object_animation: _,
-            shadow_live: _,
+            settings,
+            swapchain_generation: _,
             last_image_index: _,
         } = self;
         let extent = context.swapchain_extent();
         let image_count = context.swapchain_image_views().len();
-        let light = *light;
+        let light = settings.light;
 
         let new_targets = RenderTargets::new(context, extent, image_count)?;
         let mut new_shadow = ShadowPass::new(context, &light)?;
-        let new_mesh = MeshPass::new(
+        let mut new_mesh = MeshPass::new(
             context,
             new_targets.render_pass(),
             new_shadow.views(),
             new_shadow.sampler(),
             obj_path.as_deref(),
-            *instance_count,
+            settings.instance_count,
             image_count as u32,
             new_targets.depth_views(),
             extent,
         )?;
         let (source, source_size, per_image, per_image_size) = new_mesh.shadow_instance_buffers();
         new_shadow.attach_mesh(source, source_size, &per_image, per_image_size);
+
+        // Single restore point for explicit overrides. Fresh passes start with
+        // defaults, so without this a maximize (or any resize) silently drops
+        // --no-cull, the instance count, the debug view, and live entities.
+        new_mesh.set_culling_enabled(settings.cull_enabled);
+        if let Some(count) = settings.instance_count {
+            new_mesh.set_instance_count(count)?;
+        }
+        if settings.shadow_live && !settings.shadow_instances.is_empty() {
+            new_shadow.update_instances(context, &settings.shadow_instances)?;
+        }
+        info!(
+            cull = settings.cull_enabled,
+            instance_count = ?settings.instance_count,
+            debug_view = ?settings.debug_view,
+            shadow_live = settings.shadow_live,
+            "explicit renderer settings restored after resize"
+        );
         let new_taa = TaaPass::new(
             context,
             new_targets.hdr_views(),
@@ -412,7 +486,8 @@ impl Renderer {
             new_taa.history_views(),
         )?;
         let mut new_tonemap = new_tonemap;
-        new_tonemap.set_hdr_enabled(*hdr_enabled)?;
+        new_tonemap.set_hdr_enabled(settings.hdr_enabled)?;
+        new_tonemap.set_mode(debug_view_mode(settings.debug_view))?;
 
         // Drop descriptor consumers before the resources they reference.
         *tonemap = new_tonemap;
@@ -433,6 +508,20 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, clear_color: [f32; 4]) -> Result<(), RenderError> {
+        // `VulkanContext::render` can recreate a suboptimal/out-of-date
+        // swapchain on its own. Its image views and per-image resources are
+        // then stale, so rebuild before drawing anything into them.
+        let generation = self.context.swapchain_generation();
+        if self.swapchain_generation != generation {
+            tracing::info!(
+                from = self.swapchain_generation,
+                to = generation,
+                "swapchain recreated outside resize: rebuilding all render passes"
+            );
+            self.swapchain_generation = generation;
+            self.rebuild_passes()?;
+        }
+
         // Destructure is split because `frame_index`/`taa` need mutable access
         // while the other resources are only borrowed.
         let Self {
@@ -448,25 +537,21 @@ impl Renderer {
             frame_index,
             last_view_projection,
             pass_valid,
-            pass_cache_enabled,
             cached_frames,
             full_frames,
             obj_path: _,
-            instance_count: _,
-            light,
-            hdr_enabled: _,
-            object_animation,
-            shadow_live,
+            settings,
+            swapchain_generation: _,
             last_image_index,
         } = self;
         let extent = context.swapchain_extent();
         let aspect = extent.width as f32 / extent.height.max(1) as f32;
-        let light = *light;
+        let light = settings.light;
         let frame_number = *frame_index;
         let slot = (frame_number % FRAME_SLOTS as u64) as usize;
         let view_projection = camera.view_projection(aspect);
-        let camera_unchanged = *pass_cache_enabled
-            && !*object_animation
+        let camera_unchanged = settings.pass_cache_enabled
+            && !settings.object_animation
             && *last_view_projection == Some(view_projection);
 
         if camera_unchanged {
@@ -560,14 +645,14 @@ impl Renderer {
                             image_index,
                             view_projection,
                             frame_number,
-                            *object_animation,
+                            settings.object_animation,
                         );
                         let cull_enabled = mesh.culling_enabled();
                         shadow.record(
                             command_buffer,
                             image_index,
                             cull_enabled,
-                            *shadow_live,
+                            settings.shadow_live,
                             mesh.shadow_indirect(image_index, cull_enabled),
                             mesh.shadow_indirect(image_index, false),
                         );
@@ -656,17 +741,8 @@ impl Renderer {
     }
 
     pub fn set_debug_view(&mut self, view: DebugView) -> Result<(), RenderError> {
-        let mode = match view {
-            DebugView::Final => 0,
-            DebugView::Filmic => 1,
-            DebugView::Hdr => 2,
-            DebugView::Bloom => 3,
-            DebugView::AmbientOcclusion => 4,
-            DebugView::Depth => 5,
-            DebugView::ShadowCascade => 6,
-            DebugView::TemporalHistory => 7,
-        };
-        self.tonemap.set_mode(mode)
+        self.settings.debug_view = view;
+        self.tonemap.set_mode(debug_view_mode(view))
     }
 
     pub fn swapchain_extent(&self) -> vk::Extent2D {
@@ -688,4 +764,39 @@ fn halton(index: u64, base: u64) -> f32 {
         fraction /= base as f32;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_settings_are_defaulted_and_survive_cloning() {
+        let mut settings = RendererSettings::new(Some(4000), false);
+        assert!(settings.cull_enabled);
+        assert!(settings.pass_cache_enabled);
+        assert!(!settings.hdr_enabled);
+        assert_eq!(settings.instance_count, Some(4000));
+        assert_eq!(settings.debug_view, DebugView::Final);
+
+        settings.cull_enabled = false;
+        settings.instance_count = Some(8000);
+        settings.debug_view = DebugView::ShadowCascade;
+        settings.shadow_live = true;
+        settings.shadow_instances.push(Instance {
+            model: [[0.0; 4]; 4],
+            previous_model: [[0.0; 4]; 4],
+            base_color: [0.0; 4],
+            material: [0.0; 4],
+        });
+
+        // Resize reads these values after rebuilding every pass.
+        let restored = settings.clone();
+        assert!(!restored.cull_enabled);
+        assert_eq!(restored.instance_count, Some(8000));
+        assert_eq!(debug_view_mode(restored.debug_view), 6);
+        assert_eq!(debug_view_mode(DebugView::Final), 0);
+        assert!(restored.shadow_live);
+        assert_eq!(restored.shadow_instances.len(), 1);
+    }
 }

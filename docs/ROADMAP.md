@@ -96,6 +96,7 @@ Remaining M2 work: the RTX 3060-class 1440p/60 gate (needs the target GPU) and t
 - Frame-time profiling (p50/p99), GPU timestamps, and a regression dashboard.
 - Character/object motion vectors so HBTR can reproject dynamic objects exactly (camera motion already works). ✅ velocity attachment + jitter-consistent reprojection
 - Shadows track the mesh's live instances in real time (hot-reload). ✅ The shadow pass binds the same GPU-compacted per-image buffer and indirect draw count as the geometry pass, so culled/removed/animated entities no longer leave stale shadows. `Renderer::update_instances` overrides the shadow with live ECS entity poses when present; `hbd_engine::ecs::instances_from_objects` maps `Object` entities to `render::Instance`.
+- Resize/fullscreen never loses explicit settings. ✅ `RendererSettings` is the single source of truth for the cull A/B, instance count, debug view, HDR, light, pass cache, animation and live shadow instances; every pass rebuild re-applies it. A swapchain generation counter catches recreations that happen inside `VulkanContext::render` (suboptimal/out-of-date presents), which previously left passes bound to stale image views.
 
 **Exit criteria:** 1440p/60 fps on RTX 3060-class with the scale targets enabled; no p99 regressions; HBTR passes the no-ghosting camera-pan test.
 

@@ -59,7 +59,7 @@ struct FrameUniform {
 /// material parameters. Shared by the mesh pass, the shadow pass, and scene
 /// (ECS) consumers so all passes draw the same data.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Instance {
     pub model: [[f32; 4]; 4],
     pub previous_model: [[f32; 4]; 4],
