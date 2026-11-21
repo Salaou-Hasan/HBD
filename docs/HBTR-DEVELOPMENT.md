@@ -23,13 +23,13 @@ validation; it ghosted and was disabled (ADR 0003). HBTR (ADR 0005) added the
 modern grammar: jitter, reproject, rectify history, confidence blend, sharpen.
 That is working and is the default path today.
 
-The remaining weaknesses, as of 2026-11-21:
+Original weaknesses and what happened to them:
 
-1. A 3x3 YCoCg variance clip can still ghost when a fast object uncovers background.
-2. Sharpening is a fixed 0.12, conservative to avoid halos.
-3. Object velocity uses the pose from the frame that produced this image's history slot (correct for our per-image history, but only as good as the velocity attachment).
-4. There is no formal no-ghosting reference capture.
-5. Internal resolution presets use a plain linear upsample; there is no temporal upscaling.
+1. **3x3 variance clip ghosting** → k-DOP planes added for Medium+, but only as a *rejection signal* on moving pixels. Diagonal clipping that rewrites YCoCg was measured to produce coloured fringes, so the proven AABB clip stays on every tier. Open: verify on a fast-uncover reference capture.
+2. **Fixed 0.12 sharpening** → now contrast-adaptive on Medium+, but capped at 1.15x. Larger boosts were measured to produce coloured fringing at cube edges on the Intel dev GPU. Open: a CAS-style luma-only curve with a proper reference set.
+3. **Object velocity pose** → still the pose from the frame that produced this image's history slot; that is intentional and correct for per-image history. The `--animate` readback verifies it; a formal ghosting capture is now possible with the harness below.
+4. **No reference capture** → `tools/capture-hbtr.ps1` writes numbered window PNGs plus a manifest; documented procedure in this file.
+5. **No temporal upscaling** → HBTRU now allocates history/resolved at the **presentation** extent while colour/velocity/depth stay at the internal render extent. The resolve reconstructs the current sample on the input grid from the same nine taps and accumulates into output-resolution history. Still bilinear rather than cubic; see Open Work.
 
 ## TSR / FSR2 study (what we actually adopt)
 
@@ -81,19 +81,45 @@ at runtime without a second shader permutation.
 
 | Item | State | Notes |
 |---|---|---|
-| Rename all TAA identifiers/files to HBTR | planned | code, profiler CSV column, docs |
+| Rename all TAA identifiers/files to HBTR | done | shader, types, variables, profiler marker, docs |
 | Study TSR/FSR2 and record decisions | done | this document |
-| Adaptive sharpening + reactive confidence | planned | shader-only, uniform-gated |
-| Tighter k-DOP history rectification | planned | quality tiers |
-| HBTRU dual-extent history + cubic reconstruction | planned | pass creation + renderer extent plumbing |
-| No-ghosting capture harness | planned | explicit readback, PPM dumps, documented procedure |
-| Docs and ADRs refreshed | planned | same commit as code |
+| Adaptive sharpening + reactive confidence | done | capped at 1.15x; reactive gated to Medium+ |
+| Tighter k-DOP history rectification | done | rejection-only on moving pixels; AABB retained |
+| HBTRU dual-extent history | done | history/resolved at output extent; grid-aligned reconstruction |
+| No-ghosting capture harness | done | `tools/capture-hbtr.ps1` |
+| Docs and ADRs refreshed | in progress | this file, ANTI-ALIASING.md, ADR 0005 |
+
+### Measured cost (Intel UHD, release, 1280x720 output, moving camera, 600 frames)
+
+| Tier | HBTR p50 | Total frame p50 |
+|---|---|---|
+| Low | 0.49 ms | 1.76 ms |
+| Medium | 0.51 ms | 1.79 ms |
+| High | 0.57 ms | 1.87 ms |
+| Epic | 0.57 ms | 1.88 ms |
+
+The previous single-tier resolver was 0.45 ms / 1.85 ms. Low is within 10% of
+the old pass and total frame time is slightly better; the extra work on higher
+tiers is < 0.1 ms. Re-measure on any hardware change and update this table.
 
 ## Test procedure for forks
 
 1. `cargo build --release -p hbd-sandbox`
 2. `.\target\release\hbd-sandbox.exe --frames 600 --profile --profile-report .\profile.csv`
 3. Compare p50/p99 of `pass_hbtr` against the table above on the same machine.
-4. Capture a fast camera pan with `--capture-hbtr <dir>` (once implemented) and
-   compare consecutive frames for smearing; record the result in the PR.
+4. Capture a fast camera pan with
+   `powershell -File tools/capture-hbtr.ps1 -AppArgs @('--frames','0') -Frames 8 -OutDir .\hbtr-capture`
+   and compare consecutive frames for smearing; record the result in the PR.
 5. Never claim "better than TSR" without a reference capture and a cost number.
+
+## Open work (do not claim it is done)
+
+- **Cubic history reconstruction**: HBTRU currently reconstructs current colour
+  bilinearly from the nine existing taps. A 4-tap Catmull-Rom history filter is
+  the next visual step; it must be measured because it adds fetches.
+- **Formal ghosting metric**: the capture harness produces images; an automated
+  smearing score against an AA-off reference is still missing.
+- **Epic features**: history resurrection and flickering temporal analysis from
+  TSR are deliberately deferred.
+- **Target GPU validation**: 1440p/60 on RTX 3060-class and a reference-image
+  comparison against UE TSR cannot be closed on the Intel integrated dev GPU.

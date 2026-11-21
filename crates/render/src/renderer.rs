@@ -16,7 +16,7 @@ use crate::render_targets::RenderTargets;
 use crate::shadow::ShadowPass;
 use crate::ssao::SsaoPass;
 use crate::tonemap::TonemapPass;
-use crate::{DebugView, RenderError, RenderResolution, RendererConfig};
+use crate::{DebugView, HbtrQuality, RenderError, RenderResolution, RendererConfig};
 
 /// HBD Temporal Resolve (HBTR) is the default AA path. See `docs/ANTI-ALIASING.md`.
 const HBTR_ENABLED: bool = true;
@@ -42,6 +42,8 @@ struct RendererSettings {
     instance_count: Option<u32>,
     /// Internal render resolution, independent of the swapchain window size.
     resolution: RenderResolution,
+    /// Temporal resolver work tier.
+    hbtr_quality: HbtrQuality,
     light: DirectionalLight,
     hdr_enabled: bool,
     debug_view: DebugView,
@@ -53,11 +55,17 @@ struct RendererSettings {
 }
 
 impl RendererSettings {
-    fn new(instance_count: Option<u32>, hdr_enabled: bool, resolution: RenderResolution) -> Self {
+    fn new(
+        instance_count: Option<u32>,
+        hdr_enabled: bool,
+        resolution: RenderResolution,
+        hbtr_quality: HbtrQuality,
+    ) -> Self {
         Self {
             cull_enabled: true,
             instance_count,
             resolution,
+            hbtr_quality,
             light: DirectionalLight::default(),
             hdr_enabled,
             debug_view: DebugView::default(),
@@ -121,7 +129,14 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(context: VulkanContext) -> Result<Self, RenderError> {
         let config = RendererConfig::default();
-        Self::create(context, None, None, config.hdr, config.resolution)
+        Self::create(
+            context,
+            None,
+            None,
+            config.hdr,
+            config.resolution,
+            config.hbtr_quality,
+        )
     }
 
     /// Early-validation hook: render a single OBJ instead of the cube grid.
@@ -137,6 +152,7 @@ impl Renderer {
             None,
             config.hdr,
             config.resolution,
+            config.hbtr_quality,
         )
     }
 
@@ -146,7 +162,14 @@ impl Renderer {
         count: u32,
     ) -> Result<Self, RenderError> {
         let config = RendererConfig::default();
-        Self::create(context, None, Some(count), config.hdr, config.resolution)
+        Self::create(
+            context,
+            None,
+            Some(count),
+            config.hdr,
+            config.resolution,
+            config.hbtr_quality,
+        )
     }
 
     /// Constructs the renderer from the public config. `hdr: false` presents
@@ -155,7 +178,14 @@ impl Renderer {
         context: VulkanContext,
         config: RendererConfig,
     ) -> Result<Self, RenderError> {
-        Self::create(context, None, None, config.hdr, config.resolution)
+        Self::create(
+            context,
+            None,
+            None,
+            config.hdr,
+            config.resolution,
+            config.hbtr_quality,
+        )
     }
 
     fn create(
@@ -164,12 +194,13 @@ impl Renderer {
         instance_count: Option<u32>,
         hdr_enabled: bool,
         resolution: RenderResolution,
+        hbtr_quality: HbtrQuality,
     ) -> Result<Self, RenderError> {
         let swapchain_extent = context.swapchain_extent();
         let extent = resolution.extent(swapchain_extent);
         let image_count = context.swapchain_image_views().len();
         let light = DirectionalLight::default();
-        let settings = RendererSettings::new(instance_count, hdr_enabled, resolution);
+        let settings = RendererSettings::new(instance_count, hdr_enabled, resolution, hbtr_quality);
         info!(
             resolution = resolution.label(),
             width = extent.width,
@@ -200,6 +231,8 @@ impl Renderer {
             targets.depth_views(),
             targets.velocity_views(),
             extent,
+            swapchain_extent,
+            settings.hbtr_quality,
         )?;
         let ssao = SsaoPass::new(&context, targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
@@ -353,6 +386,18 @@ impl Renderer {
         } else {
             tracing::info!(enabled, "offscreen pass cache already in requested state");
         }
+    }
+
+    /// Changes the temporal resolver work tier without rebuilding passes.
+    /// All tiers share the same shader and visual grammar; higher tiers only
+    /// enable extra rectification/detail work.
+    pub fn set_hbtr_quality(&mut self, quality: HbtrQuality) {
+        if self.settings.hbtr_quality == quality {
+            info!(tier = quality.level(), "HBTR work tier unchanged");
+            return;
+        }
+        self.settings.hbtr_quality = quality;
+        self.hbtr.set_quality(quality);
     }
 
     /// Changes the internal render resolution and rebuilds every pass. The
@@ -517,6 +562,7 @@ impl Renderer {
             instance_count = ?settings.instance_count,
             debug_view = ?settings.debug_view,
             shadow_live = settings.shadow_live,
+            hbtr_tier = settings.hbtr_quality.level(),
             "explicit renderer settings restored after resize"
         );
         let new_hbtr = HbtrPass::new(
@@ -525,6 +571,8 @@ impl Renderer {
             new_targets.depth_views(),
             new_targets.velocity_views(),
             extent,
+            swapchain_extent,
+            settings.hbtr_quality,
         )?;
         let new_ssao = SsaoPass::new(context, new_targets.depth_views(), extent)?;
         let presented_views = if HBTR_ENABLED {
@@ -830,7 +878,12 @@ mod tests {
 
     #[test]
     fn explicit_settings_are_defaulted_and_survive_cloning() {
-        let mut settings = RendererSettings::new(Some(4000), false, RenderResolution::P1080);
+        let mut settings = RendererSettings::new(
+            Some(4000),
+            false,
+            RenderResolution::P1080,
+            HbtrQuality::Medium,
+        );
         assert!(settings.cull_enabled);
         assert!(settings.pass_cache_enabled);
         assert!(!settings.hdr_enabled);

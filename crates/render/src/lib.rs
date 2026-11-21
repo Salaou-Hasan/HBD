@@ -77,6 +77,30 @@ impl RenderResolution {
     }
 }
 
+/// Work tier for the temporal resolver. All tiers use the same algorithm and
+/// produce the same look; higher tiers add rectification/detail work when the
+/// GPU can afford it. Entry-level hardware should use `Low` or `Medium`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HbtrQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Epic,
+}
+
+impl HbtrQuality {
+    /// Numeric tier consumed by the shader's uniform branches.
+    pub fn level(self) -> u32 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::Epic => 3,
+        }
+    }
+}
+
 /// Selectable buffer visualization for renderer debugging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DebugView {
@@ -152,6 +176,8 @@ pub struct RendererConfig {
     pub path_tracing: bool,
     /// Internal render resolution; independent of the window size.
     pub resolution: RenderResolution,
+    /// Temporal resolver work tier.
+    pub hbtr_quality: HbtrQuality,
     /// Legacy scalar kept for source compatibility; `resolution` is authoritative.
     pub render_scale: f32,
     pub vram_budget_bytes: u64,
@@ -165,6 +191,7 @@ impl Default for RendererConfig {
             hdr: true,
             path_tracing: false,
             resolution: RenderResolution::Native,
+            hbtr_quality: HbtrQuality::Medium,
             render_scale: 1.0,
             vram_budget_bytes: 8 * 1024 * 1024 * 1024,
         }
@@ -184,6 +211,15 @@ mod tests {
         assert!(!config.path_tracing, "path tracing must be off by default");
         assert_eq!(config.vram_budget_bytes, 8 * 1024 * 1024 * 1024);
         assert_eq!(config.resolution, RenderResolution::Native);
+    }
+
+    #[test]
+    fn hbtr_quality_levels_are_stable() {
+        assert_eq!(HbtrQuality::Low.level(), 0);
+        assert_eq!(HbtrQuality::Medium.level(), 1);
+        assert_eq!(HbtrQuality::High.level(), 2);
+        assert_eq!(HbtrQuality::Epic.level(), 3);
+        assert_eq!(HbtrQuality::default(), HbtrQuality::Medium);
     }
 
     #[test]

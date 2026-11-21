@@ -12,9 +12,9 @@ use bytemuck::{Pod, Zeroable};
 use hbd_core::math::Mat4;
 use hbd_gfx::{GfxError, GpuBuffer, GpuImage, MemoryLocation, VulkanContext};
 
-use crate::RenderError;
 use crate::render_targets::HDR_FORMAT;
 use crate::shader;
+use crate::{HbtrQuality, RenderError};
 
 const RESOLVE_WGSL: &str = include_str!("hbtr_resolve.wgsl");
 const VERTEX_ENTRY: &CStr = c"vs_main";
@@ -25,7 +25,12 @@ const FRAGMENT_ENTRY: &CStr = c"fs_main";
 struct HbtrParams {
     inverse_view_projection: [[f32; 4]; 4],
     previous_view_projection: [[f32; 4]; 4],
+    /// x: base blend, y/z: inverse input texel size, w: history-valid flag.
     settings: [f32; 4],
+    /// x: tier level, y: base sharpen, z: reactive strength, w: reserved.
+    settings2: [f32; 4],
+    /// x/y: output/input scale (1,1 for native AA), z/w: reserved.
+    settings3: [f32; 4],
 }
 
 pub(crate) struct HbtrPass {
@@ -53,7 +58,14 @@ pub(crate) struct HbtrPass {
     initialized: Vec<bool>,
     read_history: Vec<usize>,
     read_views: Vec<vk::ImageView>,
-    extent: vk::Extent2D,
+    /// Low-resolution colour/velocity/depth input.
+    input_extent: vk::Extent2D,
+    /// History and resolved output extent. Equals the input extent for plain
+    /// HBTR, and the swapchain extent for HBTRU.
+    output_extent: vk::Extent2D,
+    /// Uniform-gated work tier; no shader permutations, so low-end GPUs simply
+    /// skip the expensive branches at runtime.
+    quality: u32,
 }
 
 impl HbtrPass {
@@ -62,7 +74,9 @@ impl HbtrPass {
         hdr_views: &[vk::ImageView],
         depth_views: &[vk::ImageView],
         velocity_views: &[vk::ImageView],
-        extent: vk::Extent2D,
+        input_extent: vk::Extent2D,
+        output_extent: vk::Extent2D,
+        quality: HbtrQuality,
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
         let image_count = hdr_views.len();
@@ -81,8 +95,8 @@ impl HbtrPass {
                     .image_type(vk::ImageType::TYPE_2D)
                     .format(HDR_FORMAT)
                     .extent(vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
+                        width: output_extent.width,
+                        height: output_extent.height,
                         depth: 1,
                     })
                     .mip_levels(1)
@@ -200,8 +214,8 @@ impl HbtrPass {
                         &vk::FramebufferCreateInfo::default()
                             .render_pass(render_pass)
                             .attachments(&attachments)
-                            .width(extent.width)
-                            .height(extent.height)
+                            .width(output_extent.width)
+                            .height(output_extent.height)
                             .layers(1),
                         None,
                     )
@@ -378,8 +392,10 @@ impl HbtrPass {
         }
 
         tracing::info!(
-            width = extent.width,
-            height = extent.height,
+            input_width = input_extent.width,
+            input_height = input_extent.height,
+            output_width = output_extent.width,
+            output_height = output_extent.height,
             "HBTR pass ready"
         );
 
@@ -404,8 +420,17 @@ impl HbtrPass {
             initialized: vec![false; image_count],
             read_history: vec![0; image_count],
             read_views,
-            extent,
+            input_extent,
+            output_extent,
+            quality: quality.level(),
         })
+    }
+
+    /// Changes the work tier without rebuilding passes. The shader reads the
+    /// tier from its uniform, so this is a cheap explicit operation.
+    pub(crate) fn set_quality(&mut self, quality: HbtrQuality) {
+        self.quality = quality.level();
+        tracing::info!(tier = quality.level(), "HBTR work tier changed");
     }
 
     pub(crate) fn resolved_views(&self) -> &[vk::ImageView] {
@@ -433,12 +458,24 @@ impl HbtrPass {
             previous_view_projection: self.previous_view_projections[index].to_cols_array_2d(),
             settings: [
                 blend,
-                1.0 / self.extent.width as f32,
-                1.0 / self.extent.height as f32,
+                1.0 / self.input_extent.width as f32,
+                1.0 / self.input_extent.height as f32,
                 // The resolve shader must not sample a freshly allocated (or
                 // post-resize) history image: its contents are undefined and a
                 // single NaN poisons the whole weighted blend into black.
                 if valid { 1.0 } else { 0.0 },
+            ],
+            settings2: [
+                self.quality as f32,
+                0.12, // base sharpen; the shader scales it with local contrast
+                0.55, // reactive confidence strength
+                0.0,
+            ],
+            settings3: [
+                self.output_extent.width as f32 / self.input_extent.width as f32,
+                self.output_extent.height as f32 / self.input_extent.height as f32,
+                0.0,
+                0.0,
             ],
         };
         self.uniform_buffers[index]
@@ -468,7 +505,7 @@ impl HbtrPass {
         let clear_values = [clear_color, clear_color];
         let render_area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
-            extent: self.extent,
+            extent: self.output_extent,
         };
 
         unsafe {
@@ -512,13 +549,13 @@ impl HbtrPass {
                 pipeline,
             );
             let viewport = vk::Viewport::default()
-                .width(self.extent.width as f32)
-                .height(self.extent.height as f32)
+                .width(self.output_extent.width as f32)
+                .height(self.output_extent.height as f32)
                 .min_depth(0.0)
                 .max_depth(1.0);
             self.device
                 .cmd_set_viewport(command_buffer, 0, std::slice::from_ref(&viewport));
-            let scissor = vk::Rect2D::default().extent(self.extent);
+            let scissor = vk::Rect2D::default().extent(self.output_extent);
             self.device
                 .cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&scissor));
             self.device.cmd_bind_descriptor_sets(

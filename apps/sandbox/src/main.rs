@@ -7,7 +7,9 @@ use hbd_engine::ecs::EcsScene;
 use hbd_engine::gfx;
 use hbd_engine::gfx::VulkanContext;
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
-use hbd_engine::render::{Camera, DebugView, RenderResolution, Renderer, RendererConfig};
+use hbd_engine::render::{
+    Camera, DebugView, HbtrQuality, RenderResolution, Renderer, RendererConfig,
+};
 use hbd_engine::scene::{Camera as EcsCamera, Entity, Light as EcsLight};
 use tracing::{error, info, warn};
 use winit::event::{ElementState, WindowEvent};
@@ -31,6 +33,7 @@ struct Sandbox {
     uncapped: bool,
     debug_view: Option<DebugView>,
     render_resolution: RenderResolution,
+    hbtr_quality: HbtrQuality,
     instances: Option<u32>,
     fps_smoothed: f32,
 }
@@ -113,6 +116,8 @@ impl PlatformHandler for Sandbox {
                 {
                     error!(%error, ?view, "failed to set startup debug view");
                 }
+                renderer.set_hbtr_quality(self.hbtr_quality);
+                info!(tier = self.hbtr_quality.level(), "HBTR work tier applied");
                 if let Err(error) = renderer.set_render_resolution(self.render_resolution) {
                     error!(%error, "failed to set render resolution");
                 } else {
@@ -357,6 +362,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let static_camera = args.iter().any(|arg| arg == "--static-camera");
+    let hbtr_quality = match args
+        .windows(2)
+        .find(|pair| pair[0] == "--quality")
+        .map(|pair| pair[1].to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("low") => HbtrQuality::Low,
+        Some("high") => HbtrQuality::High,
+        Some("epic") => HbtrQuality::Epic,
+        _ => HbtrQuality::Medium,
+    };
     let obj_path = args
         .windows(2)
         .find(|pair| pair[0] == "--obj")
@@ -395,13 +411,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let render_resolution = args
         .windows(2)
         .find(|pair| pair[0] == "--res")
-        .and_then(|pair| match pair[1].to_ascii_lowercase().as_str() {
-            "native" => Some(RenderResolution::Native),
-            "1080p" => Some(RenderResolution::P1080),
-            "1440p" => Some(RenderResolution::P1440),
-            "2k" => Some(RenderResolution::P2K),
-            "4k" => Some(RenderResolution::P4K),
-            _ => None,
+        .and_then(|pair| {
+            let value = pair[1].to_ascii_lowercase();
+            if let Some((width, height)) = value.split_once('x')
+                && let (Ok(width), Ok(height)) = (width.parse::<u32>(), height.parse::<u32>())
+            {
+                return Some(RenderResolution::Custom(width, height));
+            }
+            match value.as_str() {
+                "native" => Some(RenderResolution::Native),
+                "1080p" => Some(RenderResolution::P1080),
+                "1440p" => Some(RenderResolution::P1440),
+                "2k" => Some(RenderResolution::P2K),
+                "4k" => Some(RenderResolution::P4K),
+                _ => None,
+            }
         })
         .unwrap_or_default();
     let instances = args
@@ -418,6 +442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         animate,
         uncapped,
         resolution = render_resolution.label(),
+        hbtr_tier = hbtr_quality.level(),
         ?debug_view,
         instances,
         "sandbox profiling configuration"
@@ -472,6 +497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     uncapped,
                     debug_view,
                     render_resolution,
+                    hbtr_quality,
                     instances,
                     fps_smoothed: 0.0,
                 },

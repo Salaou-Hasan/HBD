@@ -33,10 +33,30 @@ History is per swapchain image, with its own jittered previous view-projection p
 
 The AA pass is ~0.45 ms at native 720p and ~2 ms at 1440p on the integrated GPU; on an RTX 3060-class card that is a small fraction of a 16.6 ms budget. The cost buys subpixel-smooth edges, temporal smoothing of stochastic SSAO, and no ghosting on the orbit path. Debug views `0` (final), `4` (AO), `6` (shadow) and `7` (history) are available for inspection; the sandbox also exposes `--debug <view>`.
 
+## HBTRU: temporal upscaling
+
+HBTRU is the same resolve shader with two extents. Colour, velocity and depth stay
+at the engine's internal render resolution; history and the presented resolved
+image live at the **presentation** resolution. The resolve reconstructs the
+current sample on the input grid from the same nine neighbourhood taps, then
+accumulates into output-resolution history using the same reprojection, k-DOP
+rejection and confidence blend as native HBTR. Tonemap presents at the window
+extent. This means an internal 640x360 render can drive a 1280x720 window with
+temporal reconstruction instead of a plain bilinear stretch.
+
+`RendererConfig::resolution` / `--res WxH` choose the internal size. The work
+tier (`HbtrQuality`, `--quality low|medium|high|epic`) controls k-DOP planes,
+parallax taps and sharpening; Low keeps the original AABB clip and base sharpen
+so entry-level GPUs pay almost nothing extra. See [HBTR-DEVELOPMENT.md](HBTR-DEVELOPMENT.md)
+for the TSR study, measurements and open work.
+
 ## Limitations
 
-- Velocity is object-motion only: both endpoints use the current view-projection, so camera motion is entirely owned by depth reprojection. `--animate` exercises the object path with an explicit readback; a formal no-ghosting reference capture is still outstanding.
-- No temporal upscaling: internal resolution presets upscale with the tonemap's linear sampler only. A TAAU/FSR2-style multi-frame upscale is the natural next step (1080p internal → 1440p/4K display) and would be the largest remaining visual win.
+- Velocity is object-motion only: both endpoints use the current view-projection, so camera motion is entirely owned by depth reprojection. `--animate` exercises the object path with an explicit readback.
+- k-DOP rectification is a rejection signal on moving pixels only; diagonal YCoCg clipping rewrote chroma and produced coloured fringes in testing.
+- Adaptive sharpening is capped at 1.15x; larger boosts produced fringes in testing.
+- Upscaling reconstruction is bilinear (from the existing nine taps), not cubic.
+- A formal automated no-ghosting score and a UE TSR reference comparison are still outstanding; `tools/capture-hbtr.ps1` provides the capture set.
 - The pass cache skips shadow/geometry/SSAO/bloom on identical camera poses but **not** HBTR — temporal accumulation must continue.
 - History debug view 7 samples the read slot captured at pass construction; it may not show the latest ping-pong slot.
 
