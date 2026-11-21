@@ -27,25 +27,25 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $manifest = @("exe=$Exe", "args=$($AppArgs -join ' ')", "frames=$Frames", "interval_ms=$IntervalMs")
 $proc = Start-Process -FilePath $Exe -ArgumentList $AppArgs -PassThru
 try {
-    Start-Sleep -Milliseconds 1500
-    $window = $null
-    for ($i = 0; $i -lt 20; $i++) {
-        $window = Get-Process hbd-sandbox -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-        if ($window) { break }
+    Start-Sleep -Milliseconds 2500
+    $handle = [IntPtr]::Zero
+    for ($i = 0; $i -lt 30; $i++) {
+        $proc.Refresh()
+        $handle = $proc.MainWindowHandle
+        if ($handle -ne [IntPtr]::Zero) { break }
         Start-Sleep -Milliseconds 100
     }
-    if (-not $window) { throw 'hbd-sandbox window not found' }
+    if ($handle -eq [IntPtr]::Zero) { throw 'launched process has no window' }
 
     for ($i = 0; $i -lt $Frames; $i++) {
         $rect = New-Object HbtrCapture+RECT
-        [HbtrCapture]::GetWindowRect($window.MainWindowHandle, [ref]$rect) | Out-Null
+        [HbtrCapture]::GetWindowRect($handle, [ref]$rect) | Out-Null
         $width = $rect.Right - $rect.Left
         $height = $rect.Bottom - $rect.Top
         $bitmap = New-Object System.Drawing.Bitmap $width, $height
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $hdc = $graphics.GetHdc()
-        [HbtrCapture]::PrintWindow($window.MainWindowHandle, $hdc, 2) | Out-Null
+        [HbtrCapture]::PrintWindow($handle, $hdc, 2) | Out-Null
         $graphics.ReleaseHdc($hdc)
         $path = Join-Path $OutDir ("frame_{0:D3}.png" -f $i)
         $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)

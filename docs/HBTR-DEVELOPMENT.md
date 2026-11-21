@@ -86,7 +86,8 @@ at runtime without a second shader permutation.
 | Adaptive sharpening + reactive confidence | done | capped at 1.15x; reactive gated to Medium+ |
 | Tighter k-DOP history rectification | done | rejection-only on moving pixels; AABB retained |
 | HBTRU dual-extent history | done | history/resolved at output extent; grid-aligned reconstruction |
-| No-ghosting capture harness | done | `tools/capture-hbtr.ps1` |
+| No-ghosting capture harness | done | `tools/capture-hbtr.ps1` + `tools/compare-hbtr.ps1` |
+| Cubic history reconstruction | done, experimental | 16-tap Catmull-Rom for Epic only; measured worse vs native reference and +0.44 ms, so not enabled on High |
 | Docs and ADRs refreshed | in progress | this file, ANTI-ALIASING.md, ADR 0005 |
 
 ### Measured cost (Intel UHD, release, 1280x720 output, moving camera, 600 frames)
@@ -107,19 +108,19 @@ tiers is < 0.1 ms. Re-measure on any hardware change and update this table.
 1. `cargo build --release -p hbd-sandbox`
 2. `.\target\release\hbd-sandbox.exe --frames 600 --profile --profile-report .\profile.csv`
 3. Compare p50/p99 of `pass_hbtr` against the table above on the same machine.
-4. Capture a fast camera pan with
-   `powershell -File tools/capture-hbtr.ps1 -AppArgs @('--frames','0') -Frames 8 -OutDir .\hbtr-capture`
-   and compare consecutive frames for smearing; record the result in the PR.
-5. Never claim "better than TSR" without a reference capture and a cost number.
+4. Capture a native reference and the upscaled result with the same camera path:
+   `powershell -File tools/capture-hbtr.ps1 -AppArgs @('--static-camera','--res','native') -Frames 4 -OutDir .\hbtr-ref`
+   then `powershell -File tools/capture-hbtr.ps1 -AppArgs @('--static-camera','--upscale-50') -Frames 4 -OutDir .\hbtr-test`.
+5. Score the pair:
+   `powershell -File tools/compare-hbtr.ps1 -ReferenceDir .\hbtr-ref -TestDir .\hbtr-test -OutCsv .\hbtr-compare.csv`.
+   Track MAE, p95 and the edge-weighted `ghost_score`; record them in the PR.
+6. Never claim "better than TSR" without a reference capture and a cost number.
 
 ## Open work (do not claim it is done)
 
 - **Automatic upscale toggle**: `--upscale` selects `RenderResolution::Auto(50)`; `--upscale-N` selects N percent (1..=100, clamped). Both recompute the internal size on every swapchain rebuild and override `--res`. Verified 640x360 at a 1280x720 window and 1280x778 after maximizing to 2560x1555 at 50%.
-- **Cubic history reconstruction**: HBTRU currently reconstructs current colour
-  bilinearly from the nine existing taps. A 4-tap Catmull-Rom history filter is
-  the next visual step; it must be measured because it adds fetches.
-- **Formal ghosting metric**: the capture harness produces images; an automated
-  smearing score against an AA-off reference is still missing.
+- **Cubic history reconstruction**: implemented as a 16-tap Catmull-Rom history filter, Epic-only. On a static 50% upscale it scored `ghost_score` 0.0229 vs 0.0104 for bilinear Medium against a native reference, and cost +0.44 ms. Available for comparison, not claimed as better; promote it only if a future reference set prefers it.
+- **Ghosting metric limits**: `tools/compare-hbtr.ps1` reports MAE, p95 and an edge-weighted difference. It is not yet an optical-flow-aware smear detector, and the capture harness uses `PrintWindow`, so use the same window state for both sequences.
 - **Epic features**: history resurrection and flickering temporal analysis from
   TSR are deliberately deferred.
 - **Target GPU validation**: 1440p/60 on RTX 3060-class and a reference-image

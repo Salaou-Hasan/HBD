@@ -55,7 +55,7 @@ for the TSR study, measurements and open work.
 - Velocity is object-motion only: both endpoints use the current view-projection, so camera motion is entirely owned by depth reprojection. `--animate` exercises the object path with an explicit readback.
 - k-DOP rectification is a rejection signal on moving pixels only; diagonal YCoCg clipping rewrote chroma and produced coloured fringes in testing.
 - Adaptive sharpening is capped at 1.15x; larger boosts produced fringes in testing.
-- Upscaling reconstruction is bilinear (from the existing nine taps), not cubic.
+- Upscaling reconstruction is bilinear from the existing nine taps. A 16-tap Catmull-Rom path exists at Epic but measured further from a native reference and +0.44 ms, so it is experimental only.
 - A formal automated no-ghosting score and a UE TSR reference comparison are still outstanding; `tools/capture-hbtr.ps1` provides the capture set.
 - The pass cache skips shadow/geometry/SSAO/bloom on identical camera poses but **not** HBTR — temporal accumulation must continue.
 - History debug view 7 samples the read slot captured at pass construction; it may not show the latest ping-pong slot.

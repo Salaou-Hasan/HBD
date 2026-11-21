@@ -76,6 +76,8 @@ Release build, Intel, 1280x720 window, uncapped, moving camera, 240 frames (fps 
 | 2k (2048x1080) | ~95 | 1280x720 |
 | 4k | ~60–63 | 1280x720 |
 
+At 50% upscale the resolver costs ~0.63 ms on Medium and ~1.06 ms on High/Epic on the Intel dev GPU; the Epic-only cubic history filter accounts for ~0.44 ms and scored further from a native reference than bilinear (ghost_score 0.0229 vs 0.0104 with `tools/compare-hbtr.ps1`), so it remains experimental.
+
 This is the engine-wide quality/FPS knob: pick a preset above native to trade fragment cost for resolution while keeping the same display size, or keep `Native` for a lossless image.
 
 ### Fullscreen is pixel-bound, not capped
