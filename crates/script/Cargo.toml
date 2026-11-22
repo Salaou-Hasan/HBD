@@ -5,3 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Lua scripting integration for HBD"
+
+[dependencies]
+bevy_ecs.workspace = true
+hbd-scene.workspace = true
+mlua.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -12,6 +12,17 @@ use glam::{Mat4, Vec3, Vec4};
 
 pub use bevy_ecs::prelude::*;
 
+/// Human-readable entity name used by editor panels. Pure scene data, no UI
+/// or renderer types, so gameplay and tools can both read it.
+#[derive(Component, Clone, Debug)]
+pub struct Name(pub String);
+
+impl Name {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+}
+
 /// Directional light in the scene. The engine maps this onto the renderer's
 /// shadow and geometry uniforms.
 #[derive(Component, Clone, Copy, Debug)]

@@ -63,6 +63,11 @@ impl EcsScene {
         &mut self.world
     }
 
+    /// Read-only ECS access for tools that only inspect entities.
+    pub fn world_ref(&self) -> &World {
+        &self.world
+    }
+
     /// Runs the scene schedule explicitly and returns the extracted inputs.
     pub fn run(&mut self) -> SceneFrame {
         self.schedule.run(&mut self.world);

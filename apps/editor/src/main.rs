@@ -9,17 +9,14 @@ mod scene;
 mod ui;
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use dear_imgui_ash::{AshRenderer, AshRendererConfig, Options, TextureRetirementBatch};
 use dear_imgui_rs::{ConfigFlags, Context};
 use dear_imgui_winit::{HiDpiMode, WinitPlatform};
-use hbd_engine::core::math::Vec3;
 use hbd_engine::gfx::{self, VulkanContext};
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
-use hbd_engine::render::{
-    Camera, DirectionalLight, HbtrQuality, RenderResolution, Renderer, RendererConfig,
-};
+use hbd_engine::render::{HbtrQuality, RenderResolution, Renderer, RendererConfig};
 use scene::EditorScene;
 use tracing::{error, info, warn};
 use winit::event::WindowEvent;
@@ -33,8 +30,8 @@ struct Editor {
     pending_retirement: Option<TextureRetirementBatch>,
 
     scene: EditorScene,
-    camera: Camera,
-    light_intensity: f32,
+    script_path_buf: String,
+    last_frame: Option<Instant>,
     resolution: RenderResolution,
     quality: HbtrQuality,
     shader_mtimes: Vec<Option<SystemTime>>,
@@ -148,11 +145,28 @@ impl PlatformHandler for Editor {
         }
 
         self.reload_shaders_if_changed();
+
+        // Explicit ECS frame: scripts mutate Object components, then the
+        // engine's schedule extracts camera/light/instances for this frame.
+        let now = Instant::now();
+        let dt = self.last_frame.map_or(1.0 / 60.0, |previous| {
+            now.duration_since(previous).as_secs_f32()
+        });
+        self.last_frame = Some(now);
+        let scripts_running = self.scene.scripts_running;
+        self.scene.tick(dt);
+
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_light(DirectionalLight {
-                intensity: self.light_intensity,
-                ..DirectionalLight::default()
-            });
+            if let Some(light) = self.scene.light() {
+                renderer.set_light(light);
+            }
+            // Script-driven objects move every frame; push the extracted ECS
+            // instances through the live path so the viewport follows them.
+            if scripts_running
+                && let Err(error) = renderer.update_scene_instances(&self.scene.instances())
+            {
+                error!(%error, "failed to push scripted ECS instances");
+            }
             if self.frame.is_multiple_of(120)
                 && let Ok((visible, total, tris)) = renderer.cull_counts()
             {
@@ -168,7 +182,7 @@ impl PlatformHandler for Editor {
 
         ui::build_ui(self);
 
-        let camera = self.camera;
+        let camera = self.scene.camera().unwrap_or_default();
         let clear_color = [0.015, 0.025, 0.055, 1.0];
 
         let Some(renderer) = self.renderer.as_mut() else {
@@ -246,14 +260,40 @@ impl Editor {
     }
 }
 
+/// The dock tree changed in M3: the Viewport window was replaced by an empty
+/// passthrough central node and a floating toolbar. Persisted layouts from the
+/// old build paint an opaque background over the scene, so detect them and
+/// delete the ini once. Logged explicitly; user layouts from this build are
+/// left alone.
+fn migrate_editor_layout() {
+    let path = std::path::Path::new("imgui.ini");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let stale_key = text.contains("[Window][viewport]") || !text.contains("[Window][toolbar]");
+    let occupied_central = text
+        .lines()
+        .any(|line| line.contains("CentralNode=1") && line.contains("Selected="));
+    if stale_key || occupied_central {
+        match std::fs::remove_file(path) {
+            Ok(()) => info!("stale editor dock layout removed; applying default dock tree"),
+            Err(error) => warn!(%error, "failed to remove stale editor dock layout"),
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("hbd_editor=info,hbd_render=info")
+                tracing_subscriber::EnvFilter::new(
+                    "hbd_editor=info,hbd_render=info,hbd_script=info",
+                )
             }),
         )
         .init();
+
+    migrate_editor_layout();
 
     // Renderer construction allocates large descriptor arrays on the stack.
     // The sandbox uses the same 16 MB worker thread; the default 1 MB main
@@ -281,15 +321,22 @@ fn main() {
                 continuous_redraw: true,
                 max_frames: None,
             };
+            let scene = match EditorScene::new() {
+                Ok(scene) => scene,
+                Err(error) => {
+                    error!(%error, "failed to create editor ECS scene and Lua host");
+                    return;
+                }
+            };
             let editor = Editor {
                 renderer: None,
                 imgui,
                 platform,
                 ash_renderer: None,
                 pending_retirement: None,
-                scene: EditorScene::new(),
-                camera: Camera::new(Vec3::new(9.0, 4.5, 0.0), Vec3::ZERO),
-                light_intensity: 1.0,
+                scene,
+                script_path_buf: "assets/scripts/spin.lua".to_owned(),
+                last_frame: None,
                 resolution: RenderResolution::Native,
                 quality: HbtrQuality::Medium,
                 shader_mtimes: vec![None; ui::WATCHED_SHADERS.len()],

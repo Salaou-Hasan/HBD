@@ -27,6 +27,37 @@ The editor runs its event loop on a 16 MB worker thread (like the sandbox) becau
 The editor uses vsync presentation by default. It is a normal HBD renderer:
 same HDR geometry, HBTR/HBTRU, SSAO, bloom and AgX tonemap as the sandbox.
 
+## ECS and scripting
+
+The editor's scene is the engine's `EcsScene` world, not a parallel UI model.
+Camera, light and all 82 objects are entities with `Camera`, `Light`, `Object`
+and `Name` components from `hbd-scene`. Each frame the editor:
+
+1. runs attached Lua scripts (when **Scripts** is enabled),
+2. runs the engine's explicit ECS extraction schedule (`EcsScene::run`) to get
+   camera, light and render instances,
+3. pushes the extracted instances to the renderer's live path.
+
+Hierarchy lists ECS entities; Inspector edits their `Object` components; the
+gizmo writes the selected entity's model matrix; Reset Camera edits the camera
+entity; the light intensity slider edits the light entity. Every edit is logged.
+
+`hbd-script` is a real sandboxed Lua 5.4 host (`mlua`, vendored). Scripts see
+only `math`/`string`/`table`, a `print` that logs, and a curated `hbd` table with
+`position`, `rotation` (degrees), `scale`, `color`, `dt` and `time`. They define
+`function update(dt)` and mutate that table; the host copies the result back to
+the entity. `io`, `os`, `debug` and `package` are removed. Each script has its
+own environment; files are hot-reloaded when their mtime changes. Attach or
+detach scripts from the Inspector; enable execution with the toolbar checkbox.
+Two examples live in `assets/scripts/`:
+
+```lua
+-- spin.lua
+function update(dt)
+    hbd.rotation.y = hbd.rotation.y + dt * 30.0
+end
+```
+
 ## What is in M3
 
 - `apps/editor` binary depending only on `hbd-engine`, split into `scene`

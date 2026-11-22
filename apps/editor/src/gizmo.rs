@@ -2,11 +2,12 @@
 
 use std::cmp::Ordering;
 
-use crate::scene::{EditorObject, EditorScene};
+use crate::scene::EditorScene;
 use dear_imgui_rs::{Key, MouseButton, Ui};
 use dear_imguizmo::{DrawListTarget, GizmoUi, Mode, MouseRay, Operation, compute_mouse_ray};
 use hbd_engine::core::math::{Mat4, Vec3};
-use hbd_engine::render::Camera;
+use hbd_engine::render::{Camera, Instance};
+use hbd_engine::scene::Entity;
 
 #[derive(Clone, Copy)]
 pub struct ViewportRect {
@@ -72,16 +73,15 @@ fn ray_hits_aabb(
 }
 
 /// Nearest object whose instance AABB the world-space ray hits, or `None`.
-pub fn pick_object(objects: &[EditorObject], ray: &MouseRay) -> Option<usize> {
+pub fn pick_object(objects: &[(Entity, Instance)], ray: &MouseRay) -> Option<Entity> {
     objects
         .iter()
-        .enumerate()
-        .filter_map(|(index, object)| {
-            let (min, max) = object_aabb(&Mat4::from_cols_array_2d(&object.instance.model));
-            ray_hits_aabb(ray.origin, ray.direction, min, max).map(|distance| (index, distance))
+        .filter_map(|(entity, instance)| {
+            let (min, max) = object_aabb(&Mat4::from_cols_array_2d(&instance.model));
+            ray_hits_aabb(ray.origin, ray.direction, min, max).map(|distance| (*entity, distance))
         })
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
-        .map(|(index, _)| index)
+        .map(|(entity, _)| entity)
 }
 
 /// Handles viewport picking and the ImGuizmo transform gizmo. Draws the
@@ -128,17 +128,20 @@ pub fn handle_viewport(
     {
         let view = camera.view();
         let projection = camera.projection(aspect);
+        let candidates = scene.pick_candidates();
         let hit = compute_mouse_ray(&view, &projection, mouse_pos, rect.pos, rect.size)
-            .and_then(|ray| pick_object(&scene.objects, &ray));
-        let previous = scene.selected;
+            .and_then(|ray| pick_object(&candidates, &ray));
+        let previous = scene.selected();
         scene.select(hit);
-        changed |= previous != scene.selected;
+        changed |= previous != scene.selected();
     }
 
-    let Some(index) = scene.selected else {
+    let Some(entity) = scene.selected() else {
         return changed;
     };
-    let mut model = Mat4::from_cols_array_2d(&scene.objects[index].instance.model);
+    let mut model = scene
+        .object(entity)
+        .map_or(Mat4::IDENTITY, |object| object.model);
     let view = camera.view();
     let projection = camera.projection(aspect);
     let mut builder = giz
@@ -155,7 +158,7 @@ pub fn handle_viewport(
         builder = builder.snap(scene.snap_values());
     }
     if builder.build() {
-        scene.set_transform(index, &model);
+        scene.set_transform(entity, &model);
         changed = true;
     }
 

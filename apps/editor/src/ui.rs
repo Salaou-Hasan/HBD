@@ -6,9 +6,8 @@ use dear_imgui_rs::{
 };
 use dear_imguizmo::GuizmoExt;
 use dear_imguizmo::{Operation, decompose_matrix, recompose_matrix};
-use hbd_engine::core::math::Mat4;
-use hbd_engine::render::{Camera, DebugView, HbtrQuality, RenderResolution};
-use tracing::{error, info};
+use hbd_engine::render::{DebugView, HbtrQuality, RenderResolution};
+use tracing::error;
 
 use crate::Editor;
 use crate::gizmo::{ViewportRect, handle_viewport};
@@ -112,8 +111,7 @@ pub fn build_ui(editor: &mut Editor) {
             ui.menu_bar(|| {
                 ui.menu("File", || {
                     if ui.menu_item("Reset Camera") {
-                        editor.camera = Camera::default();
-                        info!("editor camera reset to default");
+                        editor.scene.reset_camera();
                     }
                     if ui.menu_item("Reload Shaders")
                         && let Some(renderer) = editor.renderer.as_mut()
@@ -162,34 +160,41 @@ pub fn build_ui(editor: &mut Editor) {
             }
             ui.same_line();
             if ui.button("Reset Camera") {
-                editor.camera = Camera::default();
-                info!("editor camera reset to default");
+                editor.scene.reset_camera();
+            }
+            ui.same_line();
+            let mut running = editor.scene.scripts_running;
+            if ui.checkbox("Scripts", &mut running) {
+                editor.scene.set_scripts_running(running);
             }
         });
 
     // --- Hierarchy (left) --------------------------------------------------
     ui.window(keys.hierarchy.label("Hierarchy")).build(|| {
-        for index in 0..editor.scene.objects.len() {
+        let entities: Vec<_> = editor.scene.object_entities().to_vec();
+        for entity in entities {
+            let name = editor.scene.name(entity);
             if ui
-                .selectable_config(editor.scene.objects[index].name.as_str())
-                .selected(editor.scene.selected == Some(index))
+                .selectable_config(name.as_str())
+                .selected(editor.scene.selected() == Some(entity))
                 .build()
             {
-                editor.scene.select(Some(index));
+                editor.scene.select(Some(entity));
             }
         }
     });
 
     // --- Inspector (right, top) ---------------------------------------------
     ui.window(keys.inspector.label("Inspector")).build(|| {
-        let Some(index) = editor.scene.selected else {
+        let Some(entity) = editor.scene.selected() else {
             ui.text("Select an object in Hierarchy.");
             return;
         };
-        let instance = editor.scene.objects[index].instance;
-        ui.text(format!("{}  (#{index})", editor.scene.objects[index].name));
-        let (translation, rotation, scale) =
-            decompose_matrix(&Mat4::from_cols_array_2d(&instance.model));
+        let Some(object) = editor.scene.object(entity) else {
+            return;
+        };
+        ui.text(format!("{}  ({:?})", editor.scene.name(entity), entity));
+        let (translation, rotation, scale) = decompose_matrix(&object.model);
         let mut translation = translation;
         let mut rotation = rotation;
         let mut scale = scale;
@@ -206,7 +211,7 @@ pub fn build_ui(editor: &mut Editor) {
         if dirty {
             editor
                 .scene
-                .set_transform(index, &recompose_matrix(&translation, &rotation, &scale));
+                .set_transform(entity, &recompose_matrix(&translation, &rotation, &scale));
             if let Some(renderer) = editor.renderer.as_mut()
                 && let Err(error) = renderer.update_scene_instances(&editor.scene.instances())
             {
@@ -214,21 +219,21 @@ pub fn build_ui(editor: &mut Editor) {
             }
         }
         let mut color = [
-            instance.base_color[0],
-            instance.base_color[1],
-            instance.base_color[2],
+            object.base_color.x,
+            object.base_color.y,
+            object.base_color.z,
         ];
         if ui.color_edit3("Color", &mut color) {
-            editor.scene.set_color(index, color);
+            editor.scene.set_color(entity, color);
             if let Some(renderer) = editor.renderer.as_mut()
                 && let Err(error) = renderer.update_scene_instances(&editor.scene.instances())
             {
                 editor.error_message = Some(error.to_string());
             }
         }
-        let mut metallic = instance.material[0];
-        let mut roughness = instance.material[1];
-        let mut ambient_occlusion = instance.material[2];
+        let mut metallic = object.material.x;
+        let mut roughness = object.material.y;
+        let mut ao = object.material.z;
         let mut material_dirty = false;
         if ui.drag_float("Metallic", &mut metallic) {
             material_dirty = true;
@@ -236,17 +241,35 @@ pub fn build_ui(editor: &mut Editor) {
         if ui.drag_float("Roughness", &mut roughness) {
             material_dirty = true;
         }
-        if ui.drag_float("AO", &mut ambient_occlusion) {
+        if ui.drag_float("AO", &mut ao) {
             material_dirty = true;
         }
         if material_dirty {
-            editor
-                .scene
-                .set_material(index, metallic, roughness, ambient_occlusion);
+            editor.scene.set_material(entity, metallic, roughness, ao);
             if let Some(renderer) = editor.renderer.as_mut()
                 && let Err(error) = renderer.update_scene_instances(&editor.scene.instances())
             {
                 editor.error_message = Some(error.to_string());
+            }
+        }
+
+        ui.separator();
+        ui.text("Lua Script");
+        if let Some(path) = editor.scene.script_path(entity) {
+            ui.text(path.display().to_string());
+            let mut enabled = editor.scene.script_enabled(entity);
+            if ui.checkbox("Enabled", &mut enabled) {
+                editor.scene.toggle_script(entity, enabled);
+            }
+            if ui.button("Detach Script") {
+                editor.scene.detach_script(entity);
+            }
+        } else {
+            ui.input_text("Script file", &mut editor.script_path_buf)
+                .build();
+            if ui.button("Attach Script") {
+                let path = std::path::PathBuf::from(&editor.script_path_buf);
+                editor.scene.attach_script(entity, path);
             }
         }
     });
@@ -263,6 +286,10 @@ pub fn build_ui(editor: &mut Editor) {
             "Visible {}/{}  ({} tris/instance)",
             editor.last_counts.0, editor.last_counts.1, editor.last_counts.2
         ));
+        let mut intensity = editor.scene.light_intensity();
+        if ui.drag_float("Light intensity", &mut intensity) {
+            editor.scene.set_light_intensity(intensity);
+        }
         for (label, view) in [
             ("Final", DebugView::Final),
             ("HDR", DebugView::Hdr),
@@ -351,7 +378,8 @@ pub fn build_ui(editor: &mut Editor) {
         let extent = renderer.render_extent();
         extent.width as f32 / extent.height.max(1) as f32
     });
-    if handle_viewport(ui, &giz, &mut editor.scene, &editor.camera, aspect, rect)
+    let camera = editor.scene.camera().unwrap_or_default();
+    if handle_viewport(ui, &giz, &mut editor.scene, &camera, aspect, rect)
         && let Some(renderer) = editor.renderer.as_mut()
         && let Err(error) = renderer.update_scene_instances(&editor.scene.instances())
     {
