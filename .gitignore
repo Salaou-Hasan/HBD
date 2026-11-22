@@ -21,3 +21,6 @@ Desktop.ini
 *.hbd
 /logs/
 /screenshots/
+
+# Editor runtime state
+imgui.ini
