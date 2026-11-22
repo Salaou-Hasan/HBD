@@ -49,9 +49,16 @@ impl TonemapPass {
     ) -> Result<Self, RenderError> {
         let device = context.device().clone();
 
-        let vertex_spv = shader::compile_wgsl(TONEMAP_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let fragment_spv =
-            shader::compile_wgsl(TONEMAP_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
+        let vertex_spv = shader::compile_wgsl(
+            &shader::source("tonemap.wgsl", TONEMAP_WGSL),
+            "vs_main",
+            naga::ShaderStage::Vertex,
+        )?;
+        let fragment_spv = shader::compile_wgsl(
+            &shader::source("tonemap.wgsl", TONEMAP_WGSL),
+            "fs_main",
+            naga::ShaderStage::Fragment,
+        )?;
         let vertex_module = create_shader_module(&device, &vertex_spv)?;
         let fragment_module = create_shader_module(&device, &fragment_spv)?;
 

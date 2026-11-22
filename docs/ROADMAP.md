@@ -113,9 +113,9 @@ Remaining M2 work: the RTX 3060-class 1440p/60 gate (needs the target GPU) and t
 
 **Work items**
 
-- `apps/editor` binary depending on `hbd-engine` only; engine gains `editor`/`hot-reload` feature gates.
-- Scene hierarchy, entity inspector, asset browser, viewport with the engine renderer embedded.
-- Hot reload for WGSL shaders, cooked assets, and Lua scripts.
+- `apps/editor` binary depending on `hbd-engine` only; engine gains `editor`/`hot-reload` feature gates. ✅ first slice: ImGui over the engine renderer, `render_with_overlay` hook
+- Scene hierarchy, entity inspector, asset browser, viewport with the engine renderer embedded. ⏳ hierarchy/inspector read-only; asset browser pending
+- Hot reload for WGSL shaders, cooked assets, and Lua scripts. ✅ WGSL via `hbd_render::shader::source()` under `editor` feature; assets/Lua pending
 - Serialization through `bevy_reflect`; undo/redo and a stable `.scene` format.
 - Headless cooker and CI rendering tests using the same code paths as the editor.
 

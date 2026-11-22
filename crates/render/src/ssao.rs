@@ -235,8 +235,16 @@ impl SsaoPass {
             );
         }
 
-        let vertex_spv = shader::compile_wgsl(SSAO_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let fragment_spv = shader::compile_wgsl(SSAO_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
+        let vertex_spv = shader::compile_wgsl(
+            &shader::source("ssao.wgsl", SSAO_WGSL),
+            "vs_main",
+            naga::ShaderStage::Vertex,
+        )?;
+        let fragment_spv = shader::compile_wgsl(
+            &shader::source("ssao.wgsl", SSAO_WGSL),
+            "fs_main",
+            naga::ShaderStage::Fragment,
+        )?;
         let vertex_module = create_shader_module(&device, &vertex_spv)?;
         let fragment_module = create_shader_module(&device, &fragment_spv)?;
 
@@ -330,10 +338,16 @@ impl SsaoPass {
         }
 
         // Denoise pipeline: half-res bilateral cross, 9 taps with depth weights.
-        let blur_vertex_spv =
-            shader::compile_wgsl(SSAO_BLUR_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let blur_fragment_spv =
-            shader::compile_wgsl(SSAO_BLUR_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
+        let blur_vertex_spv = shader::compile_wgsl(
+            &shader::source("ssao_blur.wgsl", SSAO_BLUR_WGSL),
+            "vs_main",
+            naga::ShaderStage::Vertex,
+        )?;
+        let blur_fragment_spv = shader::compile_wgsl(
+            &shader::source("ssao_blur.wgsl", SSAO_BLUR_WGSL),
+            "fs_main",
+            naga::ShaderStage::Fragment,
+        )?;
         let blur_vertex_module = create_shader_module(&device, &blur_vertex_spv)?;
         let blur_fragment_module = create_shader_module(&device, &blur_fragment_spv)?;
         let blur_bindings = [

@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "Public facade for the HBD engine"
 
+[features]
+default = []
+editor = ["hbd-render/hot-reload"]
+hot-reload = ["hbd-render/hot-reload"]
+
 [dependencies]
 bevy_ecs.workspace = true
 hbd-assets.workspace = true

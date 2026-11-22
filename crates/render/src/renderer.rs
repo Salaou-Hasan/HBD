@@ -497,7 +497,10 @@ impl Renderer {
     /// Rebuilds every pass against the current swapchain and restores all
     /// explicit settings. Called from `resize` and whenever the swapchain was
     /// recreated outside a resize event.
-    fn rebuild_passes(&mut self) -> Result<(), RenderError> {
+    /// Rebuilds every pass against the current swapchain and settings. The
+    /// editor calls this after a shader file changes under the `hot-reload`
+    /// feature.
+    pub fn rebuild_passes(&mut self) -> Result<(), RenderError> {
         let Self {
             tonemap,
             hbtr,
@@ -612,7 +615,23 @@ impl Renderer {
         Ok(())
     }
 
+    /// Renders a frame with no editor/UI overlay.
     pub fn render(&mut self, camera: &Camera, clear_color: [f32; 4]) -> Result<(), RenderError> {
+        self.render_with_overlay(camera, clear_color, |_, _, _, _| {})
+    }
+
+    /// Renders a frame and invokes `overlay` inside the presentation pass,
+    /// after the tonemap draw. The editor uses this to submit ImGui draw data
+    /// into the same swapchain render pass without a second window or wgpu.
+    pub fn render_with_overlay<F>(
+        &mut self,
+        camera: &Camera,
+        clear_color: [f32; 4],
+        overlay: F,
+    ) -> Result<(), RenderError>
+    where
+        F: FnOnce(&ash::Device, vk::CommandBuffer, u32, vk::Extent2D),
+    {
         // `VulkanContext::render` can recreate a suboptimal/out-of-date
         // swapchain on its own. Its image views and per-image resources are
         // then stale, so rebuild before drawing anything into them.
@@ -817,10 +836,13 @@ impl Renderer {
                         active.mark(command_buffer, slot, MARK_BLOOM, frame_number);
                     }
                 },
-                |_device, command_buffer, image_index, extent| {
+                |device, command_buffer, image_index, extent| {
                     tonemap.record(command_buffer, extent, image_index);
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.mark(command_buffer, slot, MARK_TONEMAP, frame_number);
+                    }
+                    overlay(device, command_buffer, image_index, extent);
+                    if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.mark(command_buffer, slot, MARK_FRAME_END, frame_number);
                     }
                 },

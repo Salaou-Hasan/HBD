@@ -662,12 +662,27 @@ impl VulkanContext {
         &self.device
     }
 
+    /// Vulkan instance, exposed for editor-side renderer backends.
+    pub fn instance(&self) -> &ash::Instance {
+        &self.instance
+    }
+
     pub fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
     }
 
     pub fn render_pass(&self) -> vk::RenderPass {
         self.render_pass
+    }
+
+    /// Graphics queue used by the engine; the editor's ImGui renderer shares it.
+    pub fn graphics_queue(&self) -> vk::Queue {
+        self.graphics_queue
+    }
+
+    /// Command pool for transient CPU-side uploads.
+    pub fn command_pool(&self) -> vk::CommandPool {
+        self.command_pool
     }
 
     pub fn swapchain_extent(&self) -> vk::Extent2D {

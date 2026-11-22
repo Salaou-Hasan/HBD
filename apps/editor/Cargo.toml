@@ -1,0 +1,17 @@
+[package]
+name = "hbd-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HBD editor executable (depends only on hbd-engine)"
+
+[dependencies]
+ash.workspace = true
+dear-imgui-ash.workspace = true
+dear-imgui-rs.workspace = true
+dear-imgui-winit.workspace = true
+hbd-engine = { workspace = true, features = ["editor"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true

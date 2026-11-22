@@ -231,10 +231,16 @@ impl HbtrPass {
             }
         }
 
-        let resolve_vertex_spv =
-            shader::compile_wgsl(RESOLVE_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let resolve_fragment_spv =
-            shader::compile_wgsl(RESOLVE_WGSL, "fs_main", naga::ShaderStage::Fragment)?;
+        let resolve_vertex_spv = shader::compile_wgsl(
+            &shader::source("hbtr_resolve.wgsl", RESOLVE_WGSL),
+            "vs_main",
+            naga::ShaderStage::Vertex,
+        )?;
+        let resolve_fragment_spv = shader::compile_wgsl(
+            &shader::source("hbtr_resolve.wgsl", RESOLVE_WGSL),
+            "fs_main",
+            naga::ShaderStage::Fragment,
+        )?;
         let resolve_vertex_module = create_shader_module(&device, &resolve_vertex_spv)?;
         let resolve_fragment_module = create_shader_module(&device, &resolve_fragment_spv)?;
 

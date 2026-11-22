@@ -21,6 +21,31 @@ pub enum ShaderError {
     Empty(String),
 }
 
+/// Returns the shader source for a pass.
+///
+/// Normal builds use the embedded `include_str!` bytes. With the `hot-reload`
+/// feature, a file under `shaders/` wins when present, so the editor can pick
+/// up a `.wgsl` edit by rebuilding passes without restarting the process.
+pub fn source(name: &str, embedded: &'static str) -> String {
+    #[cfg(feature = "hot-reload")]
+    {
+        let candidates = [
+            std::path::Path::new("shaders").join(name),
+            std::path::Path::new("crates/render/src").join(name),
+        ];
+        for path in candidates {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                tracing::debug!(?path, "loaded shader from disk for hot reload");
+                return text;
+            }
+        }
+        tracing::warn!(name, "hot-reload shader not found, using embedded source");
+    }
+    #[cfg(not(feature = "hot-reload"))]
+    let _ = name;
+    embedded.to_owned()
+}
+
 /// Compiles one entry point from WGSL into SPIR-V words.
 pub fn compile_wgsl(
     source: &str,

@@ -205,11 +205,21 @@ impl BloomPass {
             }
         }
 
-        let vertex_spv = shader::compile_wgsl(BLOOM_WGSL, "vs_main", naga::ShaderStage::Vertex)?;
-        let horizontal_spv =
-            shader::compile_wgsl(BLOOM_WGSL, "fs_horizontal", naga::ShaderStage::Fragment)?;
-        let vertical_spv =
-            shader::compile_wgsl(BLOOM_WGSL, "fs_vertical", naga::ShaderStage::Fragment)?;
+        let vertex_spv = shader::compile_wgsl(
+            &shader::source("bloom.wgsl", BLOOM_WGSL),
+            "vs_main",
+            naga::ShaderStage::Vertex,
+        )?;
+        let horizontal_spv = shader::compile_wgsl(
+            &shader::source("bloom.wgsl", BLOOM_WGSL),
+            "fs_horizontal",
+            naga::ShaderStage::Fragment,
+        )?;
+        let vertical_spv = shader::compile_wgsl(
+            &shader::source("bloom.wgsl", BLOOM_WGSL),
+            "fs_vertical",
+            naga::ShaderStage::Fragment,
+        )?;
         let vertex_module = create_shader_module(&device, &vertex_spv)?;
         let horizontal_module = create_shader_module(&device, &horizontal_spv)?;
         let vertical_module = create_shader_module(&device, &vertical_spv)?;

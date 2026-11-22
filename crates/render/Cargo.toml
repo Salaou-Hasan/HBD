@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Renderer architecture for HBD"
 
+[features]
+default = []
+hot-reload = []
+
 [dependencies]
 ash.workspace = true
 bytemuck.workspace = true

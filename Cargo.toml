@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/sandbox",
+    "apps/editor",
     "crates/core",
     "crates/jobs",
     "crates/platform",
@@ -48,3 +49,6 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 winit = "0.30.13"
+dear-imgui-rs = "0.22"
+dear-imgui-winit = "0.22"
+dear-imgui-ash = "0.22"
