@@ -376,6 +376,23 @@ impl Renderer {
         Ok(())
     }
 
+    /// Rewrites the visible scene's instance data through the engine's live
+    /// path: the update is recorded with `vkCmdUpdateBuffer` into the current
+    /// frame, targeting the acquired image's host-visible live source buffer,
+    /// so it is ordered before the cull pass and the no-cull draw read it.
+    /// Empty input clears any queued update. Always logged; invalidates the
+    /// pass cache so edited poses re-render.
+    pub fn update_scene_instances(&mut self, instances: &[Instance]) -> Result<(), RenderError> {
+        self.mesh.set_pending_live_instances(instances)?;
+        self.last_view_projection = None;
+        self.pass_valid.fill(false);
+        tracing::info!(
+            count = instances.len(),
+            "scene instances update invalidated offscreen pass cache"
+        );
+        Ok(())
+    }
+
     /// Explicit A/B switch for the offscreen-pass cache. Always logged.
     pub fn set_pass_cache_enabled(&mut self, enabled: bool) {
         if self.settings.pass_cache_enabled != enabled {
@@ -738,6 +755,9 @@ impl Renderer {
                     if let Some(active) = profiler.borrow_mut().as_mut() {
                         active.begin_frame(command_buffer, slot, frame_number);
                     }
+                    // Live scene edits land before the cull pass and the
+                    // no-cull draw in this same command buffer.
+                    mesh.apply_pending_live(command_buffer, image_index);
 
                     let reuse = camera_unchanged
                         && pass_valid

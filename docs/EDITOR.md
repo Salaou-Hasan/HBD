@@ -1,4 +1,4 @@
-# HBD Editor (M3, first slice)
+# HBD Editor (M3, scene editor)
 
 ## Stack
 
@@ -27,15 +27,27 @@ The editor runs its event loop on a 16 MB worker thread (like the sandbox) becau
 The editor uses vsync presentation by default. It is a normal HBD renderer:
 same HDR geometry, HBTR/HBTRU, SSAO, bloom and AgX tonemap as the sandbox.
 
-## What is in slice 1
+## What is in M3
 
-- `apps/editor` binary depending only on `hbd-engine`.
+- `apps/editor` binary depending only on `hbd-engine`, split into `scene`
+  (editable model), `gizmo` (picking + `dear-imguizmo`), and `ui` (panels).
 - `Renderer::render_with_overlay(...)` — an explicit hook that records a
   caller-supplied Vulkan overlay after tonemap, inside the presentation pass.
-- ImGui panels: **Hierarchy** (camera / light / static scene), **Inspector**
-  (camera position, light direction/intensity, scene info), **Stats**
-  (frame, resolution, quality, cull counts, debug-view buttons), and **Shaders**
-  (watched WGSL files, manual reload, resolution/quality buttons).
+- Dockable panels with stable `WindowKey`s: **Hierarchy** (objects, click to
+  select), **Inspector** (position/rotation/scale, color, metallic,
+  roughness, AO), **Stats** (frame, resolution, quality, cull counts, debug
+  views), and **Shaders** (watched WGSL files, reload, resolution/quality).
+  The dockspace's central node is intentionally left **empty** with
+  `PASSTHRU_CENTRAL_NODE`: Dear ImGui paints an opaque background over any
+  window docked there, so the 3D viewport is that empty area. A transparent
+  floating **Viewport Controls** window holds the menu and gizmo toolbar.
+  Picking and the ImGuizmo transform gizmo work over the full viewport;
+  `imgui.ini` persists user docking changes.
+- `Renderer::update_scene_instances(...)` — the engine's live edit path. The
+  edit is queued and applied with `vkCmdUpdateBuffer` to the acquired image's
+  host-visible live source buffer at the top of the geometry pass, before the
+  cull pass and the no-cull draw read it. Fixed-count edits only; the pass
+  cache is invalidated and every update is logged. Add/delete are deferred.
 - Hot reload: with the `editor` feature, `hbd_render::shader::source()` reads
   `crates/render/src/*.wgsl` from disk instead of the embedded `include_str!`.
   The editor watches modification times and calls `Renderer::rebuild_passes()`.
@@ -60,12 +72,13 @@ same HDR geometry, HBTR/HBTRU, SSAO, bloom and AgX tonemap as the sandbox.
    frame uses the new shader. The **Shaders** panel also has a manual reload
    button if automatic detection is disabled.
 
-## Limitations of slice 1
+## Limitations
 
-- Hierarchy/inspector are read-only for the scene; only camera and light
-  parameters are editable. The test geometry is still `build_scene()`.
-- Docking is enabled but panels use fixed initial positions; layout is not
-  persisted yet.
+- Scene edits are fixed-count: transforms, colors and material parameters of
+  the seeded `build_scene()` objects can be changed live, but adding or
+  deleting objects is not exposed yet.
 - No asset browser, serialization, undo/redo, or Lua integration yet.
 - Hot reload watches source files under the repository root; packaged builds
   should ship precompiled SPIR-V and disable the feature.
+- If you have an `imgui.ini` from an earlier M3 build, delete it once to pick
+  up the corrected default dock tree (empty passthrough central node).

@@ -11,6 +11,7 @@ ash.workspace = true
 dear-imgui-ash.workspace = true
 dear-imgui-rs.workspace = true
 dear-imgui-winit.workspace = true
+dear-imguizmo.workspace = true
 hbd-engine = { workspace = true, features = ["editor"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

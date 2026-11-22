@@ -4,6 +4,10 @@
 //! own Vulkan swapchain pass through `Renderer::render_with_overlay`; there is
 //! no second windowing or graphics stack.
 
+mod gizmo;
+mod scene;
+mod ui;
+
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -14,34 +18,12 @@ use hbd_engine::core::math::Vec3;
 use hbd_engine::gfx::{self, VulkanContext};
 use hbd_engine::platform::{self, PlatformHandler, WindowConfig};
 use hbd_engine::render::{
-    Camera, DebugView, DirectionalLight, HbtrQuality, RenderResolution, Renderer, RendererConfig,
+    Camera, DirectionalLight, HbtrQuality, RenderResolution, Renderer, RendererConfig,
 };
+use scene::EditorScene;
 use tracing::{error, info, warn};
 use winit::event::WindowEvent;
 use winit::window::Window;
-
-const WATCHED_SHADERS: &[&str] = &[
-    "crates/render/src/mesh.wgsl",
-    "crates/render/src/sky.wgsl",
-    "crates/render/src/mesh_generate.wgsl",
-    "crates/render/src/cull.wgsl",
-    "crates/render/src/cluster.wgsl",
-    "crates/render/src/hzb.wgsl",
-    "crates/render/src/animate.wgsl",
-    "crates/render/src/hbtr_resolve.wgsl",
-    "crates/render/src/shadow.wgsl",
-    "crates/render/src/ssao.wgsl",
-    "crates/render/src/ssao_blur.wgsl",
-    "crates/render/src/bloom.wgsl",
-    "crates/render/src/tonemap.wgsl",
-];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Selection {
-    Camera,
-    Light,
-    Scene,
-}
 
 struct Editor {
     renderer: Option<Renderer>,
@@ -50,9 +32,8 @@ struct Editor {
     ash_renderer: Option<AshRenderer>,
     pending_retirement: Option<TextureRetirementBatch>,
 
-    selection: Selection,
-    camera_position: [f32; 3],
-    light_direction: [f32; 3],
+    scene: EditorScene,
+    camera: Camera,
     light_intensity: f32,
     resolution: RenderResolution,
     quality: HbtrQuality,
@@ -121,7 +102,7 @@ impl PlatformHandler for Editor {
         {
             error!(%error, "failed to attach ImGui to editor window");
         }
-        self.shader_mtimes = WATCHED_SHADERS.iter().map(|_| None).collect();
+        self.shader_mtimes = ui::WATCHED_SHADERS.iter().map(|_| None).collect();
         self.reload_shaders_if_changed();
     }
 
@@ -169,14 +150,14 @@ impl PlatformHandler for Editor {
         self.reload_shaders_if_changed();
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_light(DirectionalLight {
-                direction: Vec3::from_array(self.light_direction),
-                color: Vec3::new(1.0, 0.96, 0.9),
                 intensity: self.light_intensity,
+                ..DirectionalLight::default()
             });
             if self.frame.is_multiple_of(120)
                 && let Ok((visible, total, tris)) = renderer.cull_counts()
             {
                 self.last_counts = (visible, total, tris);
+                info!(visible, total, tris, "editor cull counts");
             }
         }
 
@@ -185,9 +166,9 @@ impl PlatformHandler for Editor {
             return;
         }
 
-        self.build_ui();
+        ui::build_ui(self);
 
-        let camera = Camera::new(Vec3::from_array(self.camera_position), Vec3::ZERO);
+        let camera = self.camera;
         let clear_color = [0.015, 0.025, 0.055, 1.0];
 
         let Some(renderer) = self.renderer.as_mut() else {
@@ -244,167 +225,8 @@ fn self_deferred_retirement(batch: TextureRetirementBatch) {
 }
 
 impl Editor {
-    fn build_ui(&mut self) {
-        let ui = self.imgui.frame();
-        let mut reload = false;
-        let mut debug_view = None;
-        let mut set_resolution = None;
-        let mut set_quality = None;
-
-        ui.window("Hierarchy")
-            .position([20.0, 20.0], dear_imgui_rs::Condition::Always)
-            .size([220.0, 260.0], dear_imgui_rs::Condition::Always)
-            .build(|| {
-                if ui
-                    .selectable_config("Camera")
-                    .selected(self.selection == Selection::Camera)
-                    .build()
-                {
-                    self.selection = Selection::Camera;
-                }
-                if ui
-                    .selectable_config("Directional Light")
-                    .selected(self.selection == Selection::Light)
-                    .build()
-                {
-                    self.selection = Selection::Light;
-                }
-                if ui
-                    .selectable_config("Cube Grid (static)")
-                    .selected(self.selection == Selection::Scene)
-                    .build()
-                {
-                    self.selection = Selection::Scene;
-                }
-            });
-
-        ui.window("Inspector")
-            .position([20.0, 300.0], dear_imgui_rs::Condition::Always)
-            .size([260.0, 240.0], dear_imgui_rs::Condition::Always)
-            .build(|| match self.selection {
-                Selection::Camera => {
-                    ui.text("Camera");
-                    let _ = ui.input_float3("Position", &mut self.camera_position);
-                }
-                Selection::Light => {
-                    ui.text("Directional Light");
-                    let _ = ui.input_float3("Direction", &mut self.light_direction);
-                    ui.input_float("Intensity", &mut self.light_intensity);
-                }
-                Selection::Scene => {
-                    ui.text("Static test scene: 82 cube instances");
-                    ui.text("Materials: bindless array (neutral placeholder)");
-                }
-            });
-
-        ui.window("Stats")
-            .position([700.0, 20.0], dear_imgui_rs::Condition::Always)
-            .size([310.0, 220.0], dear_imgui_rs::Condition::Always)
-            .build(|| {
-                ui.text(format!("Frame {}", self.frame));
-                ui.text(format!(
-                    "Resolution {:?} / {:?}",
-                    self.resolution.label(),
-                    self.quality
-                ));
-                ui.text(format!(
-                    "Visible {}/{}  ({} tris/instance)",
-                    self.last_counts.0, self.last_counts.1, self.last_counts.2
-                ));
-                if ui.button("Final") {
-                    debug_view = Some(DebugView::Final);
-                }
-                ui.same_line();
-                if ui.button("HDR") {
-                    debug_view = Some(DebugView::Hdr);
-                }
-                ui.same_line();
-                if ui.button("AO") {
-                    debug_view = Some(DebugView::AmbientOcclusion);
-                }
-                ui.same_line();
-                if ui.button("History") {
-                    debug_view = Some(DebugView::TemporalHistory);
-                }
-            });
-
-        ui.window("Shaders")
-            .position([700.0, 260.0], dear_imgui_rs::Condition::Always)
-            .size([310.0, 440.0], dear_imgui_rs::Condition::Always)
-            .build(|| {
-                ui.text("Hot reload: crates/render/src/");
-                for (path, changed) in WATCHED_SHADERS.iter().zip(self.shader_mtimes.iter()) {
-                    let status = if changed.is_some() { "ok" } else { "missing" };
-                    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-                    ui.text(format!("{}: {}", name, status));
-                }
-                if ui.button("Reload shaders now") {
-                    reload = true;
-                }
-                for (label, resolution) in [
-                    ("Native", RenderResolution::Native),
-                    ("1080p", RenderResolution::P1080),
-                    ("Auto 50%", RenderResolution::Auto(50)),
-                    ("Auto 85%", RenderResolution::Auto(85)),
-                ] {
-                    if ui.button(label) {
-                        set_resolution = Some(resolution);
-                    }
-                    ui.same_line();
-                }
-                ui.new_line();
-                for (label, quality) in [
-                    ("Low", HbtrQuality::Low),
-                    ("Medium", HbtrQuality::Medium),
-                    ("High", HbtrQuality::High),
-                    ("Epic", HbtrQuality::Epic),
-                ] {
-                    if ui.button(label) {
-                        set_quality = Some(quality);
-                    }
-                    ui.same_line();
-                }
-                ui.new_line();
-            });
-
-        if reload
-            && let Some(renderer) = self.renderer.as_mut()
-            && let Err(error) = renderer.rebuild_passes()
-        {
-            self.error_message = Some(error.to_string());
-        }
-        if let Some(view) = debug_view
-            && let Some(renderer) = self.renderer.as_mut()
-            && let Err(error) = renderer.set_debug_view(view)
-        {
-            self.error_message = Some(error.to_string());
-        }
-        if let Some(resolution) = set_resolution
-            && let Some(renderer) = self.renderer.as_mut()
-            && let Err(error) = renderer.set_render_resolution(resolution)
-        {
-            self.error_message = Some(error.to_string());
-        } else if let Some(resolution) = set_resolution {
-            self.resolution = resolution;
-        }
-        if let Some(quality) = set_quality
-            && let Some(renderer) = self.renderer.as_mut()
-        {
-            renderer.set_hbtr_quality(quality);
-            self.quality = quality;
-        }
-
-        if let Some(error) = &self.error_message {
-            ui.window("Error")
-                .size([360.0, 120.0], dear_imgui_rs::Condition::Always)
-                .build(|| {
-                    ui.text_colored([1.0, 0.3, 0.3, 1.0], error);
-                });
-        }
-    }
-
     fn reload_shaders_if_changed(&mut self) {
-        for (index, path) in WATCHED_SHADERS.iter().enumerate() {
+        for (index, path) in ui::WATCHED_SHADERS.iter().enumerate() {
             let modified = std::fs::metadata(path)
                 .ok()
                 .and_then(|metadata| metadata.modified().ok());
@@ -465,13 +287,12 @@ fn main() {
                 platform,
                 ash_renderer: None,
                 pending_retirement: None,
-                selection: Selection::Scene,
-                camera_position: [9.0, 4.5, 0.0],
-                light_direction: [0.35, 0.85, 0.4],
+                scene: EditorScene::new(),
+                camera: Camera::new(Vec3::new(9.0, 4.5, 0.0), Vec3::ZERO),
                 light_intensity: 1.0,
                 resolution: RenderResolution::Native,
                 quality: HbtrQuality::Medium,
-                shader_mtimes: vec![None; WATCHED_SHADERS.len()],
+                shader_mtimes: vec![None; ui::WATCHED_SHADERS.len()],
                 frame: 0,
                 last_counts: (0, 0, 0),
                 error_message: None,

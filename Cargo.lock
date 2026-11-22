@@ -647,6 +647,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dear-imguizmo"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a27078cf884a2eb7451126a91a202b0575d97e3de269122f2573e3371ae47544"
+dependencies = [
+ "bitflags 2.13.2",
+ "dear-imgui-rs",
+ "dear-imgui-sys",
+ "dear-imguizmo-sys",
+ "glam 0.34.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "dear-imguizmo-sys"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa647f05238bac32ac56baaa68cb58f697aeab335858413d3d0fd55cec71735b"
+dependencies = [
+ "cc",
+ "dear-imgui-build-support",
+ "dear-imgui-sys",
+ "mint",
+]
+
+[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -969,6 +995,7 @@ dependencies = [
  "dear-imgui-ash",
  "dear-imgui-rs",
  "dear-imgui-winit",
+ "dear-imguizmo",
  "hbd-engine",
  "tracing",
  "tracing-subscriber",

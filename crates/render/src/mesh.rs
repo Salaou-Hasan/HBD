@@ -115,9 +115,17 @@ pub(crate) struct MeshPass {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     /// Per-swapchain-image graphics sets: each binds that image's compacted
-    /// instance buffer. The extra set binds the source buffer for `--no-cull`.
+    /// instance buffer.
     graphics_sets: Vec<vk::DescriptorSet>,
-    graphics_set_no_cull: vk::DescriptorSet,
+    /// Per-image no-cull draw sets: each binds that image's live source buffer.
+    graphics_sets_no_cull: Vec<vk::DescriptorSet>,
+    /// Per-image host-visible source instance buffers for live scene edits.
+    /// They are only used when the scene was uploaded; the GPU-generated bowl
+    /// keeps drawing from `_instance_buffer`.
+    live_sources: Vec<GpuBuffer>,
+    /// Instances queued by `Renderer::update_scene_instances`, applied to the
+    /// acquired image's live source at the top of the geometry pass.
+    pending_live: Option<Vec<Instance>>,
     vertex_buffer: GpuBuffer,
     index_buffer: GpuBuffer,
     // Kept alive for the lifetime of the descriptor set; not read after setup.
@@ -444,7 +452,7 @@ impl MeshPass {
             "HBD index buffer",
         )?;
         let index_count = indices.len() as u32;
-        let (instance_buffer, generated, base_count, instance_source) =
+        let (instance_buffer, generated, base_count, instance_source, live_sources) =
             if let Some(count) = instance_count {
                 if count == 0 {
                     return Err(RenderError::Obj(
@@ -567,6 +575,7 @@ impl MeshPass {
                     )),
                     count,
                     "GPU bowl generator",
+                    Vec::new(),
                 )
             } else {
                 let buffer = context.upload_buffer(
@@ -575,7 +584,12 @@ impl MeshPass {
                     "HBD instance buffer",
                 )?;
                 let count = instances.len() as u32;
-                (buffer, None, count, source)
+                let live_sources = Self::create_live_sources(context, &instances, image_count)?;
+                info!(
+                    images = image_count,
+                    count, "live source instance buffers ready"
+                );
+                (buffer, None, count, source, live_sources)
             };
         let draw = [index_count, base_count, 0u32, 0u32, 0u32];
         // The no-cull draw args are CPU-written. Per-image args are written by
@@ -1409,10 +1423,10 @@ impl MeshPass {
             .buffer(cull_uniform.buffer())
             .offset(0)
             .range(cull_uniform.size())];
-        let source_info = [vk::DescriptorBufferInfo::default()
-            .buffer(instance_buffer.buffer())
-            .offset(0)
-            .range(instance_buffer.size())];
+        // Per-image instance source infos: the live source buffers when they
+        // exist, the shared source buffer otherwise.
+        let cull_source_infos =
+            instance_source_infos(&live_sources, &instance_buffer, image_count as usize);
         for (index, set) in cull_sets.iter().enumerate() {
             let visible_info = [vk::DescriptorBufferInfo::default()
                 .buffer(visible_buffers[index].buffer())
@@ -1438,7 +1452,7 @@ impl MeshPass {
                             .dst_set(*set)
                             .dst_binding(1)
                             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&source_info),
+                            .buffer_info(&cull_source_infos[index]),
                         vk::WriteDescriptorSet::default()
                             .dst_set(*set)
                             .dst_binding(2)
@@ -1464,25 +1478,28 @@ impl MeshPass {
             image_count, "GPU frustum culling ready"
         );
 
+        // Graphics sets: image_count compacted sets plus one per-image no-cull
+        // set, so a live edit can target the buffer the current frame reads.
+        let set_count = image_count as usize * 2;
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(image_count + 1),
+                .descriptor_count(set_count as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(image_count + 1),
+                .descriptor_count(set_count as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(4 * (image_count + 1)),
+                .descriptor_count(4 * set_count as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(2 * (image_count + 1)),
+                .descriptor_count(2 * set_count as u32),
         ];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .pool_sizes(&pool_sizes)
-                    .max_sets(image_count + 1),
+                    .max_sets(set_count as u32),
                 None,
             )
         }
@@ -1491,17 +1508,14 @@ impl MeshPass {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(descriptor_pool)
-                    .set_layouts(&vec![descriptor_set_layout; (image_count + 1) as usize]),
+                    .set_layouts(&vec![descriptor_set_layout; set_count]),
             )
         }
         .map_err(GfxError::Vulkan)?;
         let graphics_sets: Vec<vk::DescriptorSet> = allocated_sets[..image_count as usize].to_vec();
-        let graphics_set_no_cull = allocated_sets[image_count as usize];
+        let graphics_sets_no_cull: Vec<vk::DescriptorSet> =
+            allocated_sets[image_count as usize..].to_vec();
 
-        let source_info = [vk::DescriptorBufferInfo::default()
-            .buffer(instance_buffer.buffer())
-            .offset(0)
-            .range(instance_buffer.size())];
         let shadow_image_infos: Vec<_> = shadow_views
             .iter()
             .copied()
@@ -1570,49 +1584,51 @@ impl MeshPass {
             ];
             unsafe { device.update_descriptor_sets(&writes, &[]) };
         }
-        let no_cull_writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&uniform_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&source_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&shadow_image_infos[0..1]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(3)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&shadow_image_infos[1..2]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(4)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&shadow_image_infos[2..3]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(5)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(&shadow_sampler_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(6)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&material_image_info),
-            vk::WriteDescriptorSet::default()
-                .dst_set(graphics_set_no_cull)
-                .dst_binding(7)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(&material_sampler_info),
-        ];
-        unsafe { device.update_descriptor_sets(&no_cull_writes, &[]) };
+        for (index, set) in graphics_sets_no_cull.iter().enumerate() {
+            let no_cull_writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&uniform_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&cull_source_infos[index]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[0..1]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(3)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[1..2]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(4)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&shadow_image_infos[2..3]),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&shadow_sampler_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(6)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(&material_image_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(7)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&material_sampler_info),
+            ];
+            unsafe { device.update_descriptor_sets(&no_cull_writes, &[]) };
+        }
 
         info!(
             instances = base_count,
@@ -1629,7 +1645,9 @@ impl MeshPass {
             descriptor_set_layout,
             descriptor_pool,
             graphics_sets,
-            graphics_set_no_cull,
+            graphics_sets_no_cull,
+            live_sources,
+            pending_live: None,
             vertex_buffer,
             index_buffer,
             _instance_buffer: instance_buffer,
@@ -1761,6 +1779,94 @@ impl MeshPass {
 
     pub(crate) fn culling_enabled(&self) -> bool {
         self.cull_enabled
+    }
+
+    /// Per-image host-visible source buffers for live scene edits. They are
+    /// written with `vkCmdUpdateBuffer` at the top of the geometry pass, after
+    /// this image's fence has been waited on, so no host write can race an
+    /// in-flight frame.
+    fn create_live_sources(
+        context: &VulkanContext,
+        instances: &[Instance],
+        image_count: u32,
+    ) -> Result<Vec<GpuBuffer>, RenderError> {
+        let mut sources = Vec::with_capacity(image_count as usize);
+        for _ in 0..image_count {
+            let buffer = context.create_buffer(
+                instances.len() as u64 * size_of::<Instance>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::CpuToGpu,
+                "HBD live source instances",
+            )?;
+            buffer.write(bytemuck::cast_slice(instances))?;
+            sources.push(buffer);
+        }
+        Ok(sources)
+    }
+
+    /// Queues instances for the live scene edit path. The update is applied to
+    /// the acquired image's source buffer by `apply_pending_live` at the top of
+    /// the next geometry pass. Fixed-count only: the count must fit the live
+    /// source buffers; the draw count itself is not changed (add/delete are
+    /// deferred to the next pass-cache invalidation).
+    pub(crate) fn set_pending_live_instances(
+        &mut self,
+        instances: &[Instance],
+    ) -> Result<(), RenderError> {
+        if instances.is_empty() {
+            self.pending_live = None;
+            info!("scene instance update cleared (empty instance list)");
+            return Ok(());
+        }
+        let Some(capacity_buffer) = self.live_sources.first() else {
+            return Err(RenderError::Obj(
+                "live scene edits need an uploaded instance scene".to_owned(),
+            ));
+        };
+        let capacity = capacity_buffer.size() as usize / size_of::<Instance>();
+        if instances.len() > capacity {
+            return Err(RenderError::Obj(format!(
+                "instance count {} exceeds live source capacity {capacity}",
+                instances.len()
+            )));
+        }
+        self.pending_live = Some(instances.to_vec());
+        info!(
+            count = instances.len(),
+            capacity, "scene instances queued for live update"
+        );
+        Ok(())
+    }
+
+    /// Records the queued live instance update, if any, so the cull pass and
+    /// the no-cull draw read the new data. Must be called before any reader of
+    /// the source buffer in the current pass.
+    pub(crate) fn apply_pending_live(
+        &mut self,
+        command_buffer: vk::CommandBuffer,
+        image_index: u32,
+    ) {
+        let Some(instances) = self.pending_live.take() else {
+            return;
+        };
+        let Some(buffer) = self.live_sources.get(image_index as usize) else {
+            self.pending_live = Some(instances);
+            return;
+        };
+        let capacity = buffer.size() as usize;
+        let mut bytes = vec![0u8; capacity];
+        let new_bytes = bytemuck::cast_slice(&instances);
+        bytes[..new_bytes.len()].copy_from_slice(new_bytes);
+        unsafe {
+            self.device
+                .cmd_update_buffer(command_buffer, buffer.buffer(), 0, &bytes)
+        };
+        info!(
+            image_index,
+            bytes = new_bytes.len(),
+            zero_padded = capacity.saturating_sub(new_bytes.len()),
+            "live scene instances applied via vkCmdUpdateBuffer"
+        );
     }
 
     /// Instance buffers shared with the shadow pass: the source buffer, the
@@ -2122,7 +2228,10 @@ impl MeshPass {
                 &self.indirect_buffers[image_index as usize],
             )
         } else {
-            (self.graphics_set_no_cull, &self.indirect_buffer_no_cull)
+            (
+                self.graphics_sets_no_cull[image_index as usize],
+                &self.indirect_buffer_no_cull,
+            )
         };
         unsafe {
             let viewport = vk::Viewport::default()
@@ -2259,6 +2368,25 @@ fn create_shader_module(
     .map_err(RenderError::Gfx)
 }
 
+/// Descriptor buffer infos, one per image, targeting that image's live
+/// instance source buffer or the shared source buffer when live sources do
+/// not exist (GPU-generated scenes).
+fn instance_source_infos(
+    live_sources: &[GpuBuffer],
+    default_source: &GpuBuffer,
+    image_count: usize,
+) -> Vec<[vk::DescriptorBufferInfo; 1]> {
+    (0..image_count)
+        .map(|index| {
+            let buffer = live_sources.get(index).unwrap_or(default_source);
+            [vk::DescriptorBufferInfo::default()
+                .buffer(buffer.buffer())
+                .offset(0)
+                .range(buffer.size())]
+        })
+        .collect()
+}
+
 pub(crate) fn cube_mesh() -> (Vec<Vertex>, Vec<u32>) {
     // Four vertices per face keep normals flat without a geometry pass.
     let faces = [
@@ -2339,7 +2467,7 @@ pub(crate) fn cube_mesh() -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-pub(crate) fn build_scene() -> Vec<Instance> {
+pub fn build_scene() -> Vec<Instance> {
     let mut instances = Vec::new();
 
     // Saturated, distinct colors make the lighting and shadow response easy to

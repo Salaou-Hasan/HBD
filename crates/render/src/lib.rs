@@ -24,7 +24,7 @@ mod ssao;
 mod tonemap;
 
 pub use camera::{Camera, DirectionalLight};
-pub use mesh::Instance;
+pub use mesh::{Instance, build_scene};
 
 /// Internal render resolution. The window/swapchain size never changes: all
 /// offscreen passes run at this resolution and the tonemap pass upscales with
