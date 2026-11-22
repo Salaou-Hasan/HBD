@@ -39,6 +39,7 @@ const GRID_SPACING: f32 = 1.25;
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 3],
     pub(crate) normal: [f32; 3],
+    pub(crate) uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -280,6 +281,11 @@ impl MeshPass {
                 .location(1)
                 .format(vk::Format::R32G32B32_SFLOAT)
                 .offset(offset_of!(Vertex, normal) as u32),
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(2)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(offset_of!(Vertex, uv) as u32),
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(std::slice::from_ref(&binding_description))
@@ -2276,13 +2282,17 @@ pub(crate) fn cube_mesh() -> (Vec<Vertex>, Vec<u32>) {
 
     let mut vertices = Vec::with_capacity(24);
     let mut indices = Vec::with_capacity(36);
+    // Per-face UVs: sampling in face-local space avoids the world-space
+    // projection that used to paint bands across vertical faces.
+    let face_uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
     for (normal, corners) in faces {
         let base = vertices.len() as u32;
-        for corner in corners {
+        for (corner_index, corner) in corners.into_iter().enumerate() {
             vertices.push(Vertex {
                 position: corner.to_array(),
                 normal: normal.to_array(),
+                uv: face_uvs[corner_index],
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -2434,14 +2444,6 @@ pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance),
         }
     }
 
-    let vertices: Vec<Vertex> = positions
-        .iter()
-        .zip(normals.iter())
-        .map(|(position, normal)| Vertex {
-            position: position.to_array(),
-            normal: normal.to_array(),
-        })
-        .collect();
     let indices: Vec<u32> = faces.into_iter().flatten().collect();
 
     let minimum = positions
@@ -2457,6 +2459,20 @@ pub(crate) fn load_obj(path: &Path) -> Result<(Vec<Vertex>, Vec<u32>, Instance),
         return Err(RenderError::Obj(format!("{location}: degenerate bounds")));
     }
     let scale = 5.0 / largest;
+    // The OBJ loader has no UV channel; derive stable planar UVs from the
+    // normalized local position so material sampling is geometry-relative.
+    let vertices: Vec<Vertex> = positions
+        .iter()
+        .zip(normals.iter())
+        .map(|(position, normal)| {
+            let local = (*position - center) / largest + Vec3::splat(0.5);
+            Vertex {
+                position: position.to_array(),
+                normal: normal.to_array(),
+                uv: [local.x, local.z],
+            }
+        })
+        .collect();
     let model = Mat4::from_translation(Vec3::new(0.0, 1.6, 0.0))
         * Mat4::from_rotation_y(std::f32::consts::PI)
         * Mat4::from_scale(Vec3::splat(scale))
@@ -2498,40 +2514,17 @@ impl MeshPass {
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             "HBD material table",
         )?;
-        // Four simple patterns so the per-instance layer index is visible.
+        // Neutral placeholder texels. The old demo patterns (checker, stripe,
+        // dot and gradient) were sampled with world-space XZ coordinates and
+        // produced false banding on cube sides; they are not part of the
+        // rendering target. The bindless layer selection stays intact and
+        // becomes meaningful when a real material/texture pipeline is added.
         let mut material_pixels =
             Vec::with_capacity((MATERIAL_SIZE * MATERIAL_SIZE * MATERIAL_LAYERS * 4) as usize);
-        for layer in 0..MATERIAL_LAYERS {
-            for y in 0..MATERIAL_SIZE {
-                for x in 0..MATERIAL_SIZE {
-                    let checker = (x + y) % 2 == 0;
-                    let stripe = x < 2;
-                    let dot = x == 1 && y == 1;
-                    let shade = match layer {
-                        0 => {
-                            if checker {
-                                255
-                            } else {
-                                170
-                            }
-                        }
-                        1 => {
-                            if stripe {
-                                255
-                            } else {
-                                110
-                            }
-                        }
-                        2 => {
-                            if dot {
-                                255
-                            } else {
-                                140
-                            }
-                        }
-                        _ => 120 + x * 32 + y * 8,
-                    } as u8;
-                    material_pixels.extend_from_slice(&[shade, shade, shade, 255]);
+        for _layer in 0..MATERIAL_LAYERS {
+            for _y in 0..MATERIAL_SIZE {
+                for _x in 0..MATERIAL_SIZE {
+                    material_pixels.extend_from_slice(&[255, 255, 255, 255]);
                 }
             }
         }
@@ -2672,5 +2665,19 @@ mod tests {
         );
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cube_mesh_has_face_local_uvs() {
+        let (vertices, indices) = cube_mesh();
+        assert_eq!(vertices.len(), 24);
+        assert_eq!(indices.len(), 36);
+        assert_eq!(size_of::<Vertex>(), 32); // pos + normal + uv
+        let expected = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for face in vertices.chunks(4) {
+            for (vertex, uv) in face.iter().zip(expected) {
+                assert_eq!(vertex.uv, uv);
+            }
+        }
     }
 }

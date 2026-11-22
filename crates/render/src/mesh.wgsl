@@ -31,6 +31,7 @@ struct Instance {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -47,6 +48,7 @@ struct VertexOutput {
     // perspective-correcting clip coordinates before the divide.
     @location(8) @interpolate(linear) current_ndc: vec2<f32>,
     @location(9) @interpolate(linear) previous_ndc: vec2<f32>,
+    @location(10) uv: vec2<f32>,
 };
 
 @vertex
@@ -63,6 +65,7 @@ fn vs_main(
     output.world_normal = normalize((instance.model * vec4<f32>(input.normal, 0.0)).xyz);
     output.base_color = instance.base_color.rgb;
     output.material = instance.material;
+    output.uv = input.uv;
     // Object motion only: both endpoints use the same view-projection, so the
     // camera part cancels and HBTR's depth reprojection owns camera motion.
     let current_clip = frame.view_projection * world_position;
@@ -154,7 +157,7 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     let texel = textureSample(
         material_textures,
         material_sampler,
-        input.world_position.xz * 0.5,
+        input.uv,
         material_layer,
     );
     let albedo = input.base_color * texel.rgb;
