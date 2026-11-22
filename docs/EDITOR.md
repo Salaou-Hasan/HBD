@@ -22,6 +22,8 @@ cargo build --release -p hbd-editor
 .\target\release\hbd-editor.exe
 ```
 
+The editor runs its event loop on a 16 MB worker thread (like the sandbox) because renderer construction allocates large descriptor arrays on the stack; the default 1 MB main-thread stack overflows in debug builds.
+
 The editor uses vsync presentation by default. It is a normal HBD renderer:
 same HDR geometry, HBTR/HBTRU, SSAO, bloom and AgX tonemap as the sandbox.
 

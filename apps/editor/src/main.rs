@@ -433,44 +433,60 @@ fn main() {
         )
         .init();
 
-    let mut imgui = Context::create();
-    let flags = imgui.io().config_flags() | ConfigFlags::DOCKING_ENABLE;
-    imgui.io_mut().set_config_flags(flags);
-    let platform = match WinitPlatform::new(&mut imgui) {
-        Ok(platform) => platform,
-        Err(error) => {
-            error!(%error, "failed to create ImGui winit platform");
-            return;
+    // Renderer construction allocates large descriptor arrays on the stack.
+    // The sandbox uses the same 16 MB worker thread; the default 1 MB main
+    // thread stack overflows in debug builds.
+    let runner = std::thread::Builder::new()
+        .name("hbd-editor".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let mut imgui = Context::create();
+            let flags = imgui.io().config_flags() | ConfigFlags::DOCKING_ENABLE;
+            imgui.io_mut().set_config_flags(flags);
+            let platform = match WinitPlatform::new(&mut imgui) {
+                Ok(platform) => platform,
+                Err(error) => {
+                    error!(%error, "failed to create ImGui winit platform");
+                    return;
+                }
+            };
+
+            let config = WindowConfig {
+                title: "HBD Editor".to_owned(),
+                width: 1280,
+                height: 720,
+                resizable: true,
+                continuous_redraw: true,
+                max_frames: None,
+            };
+            let editor = Editor {
+                renderer: None,
+                imgui,
+                platform,
+                ash_renderer: None,
+                pending_retirement: None,
+                selection: Selection::Scene,
+                camera_position: [9.0, 4.5, 0.0],
+                light_direction: [0.35, 0.85, 0.4],
+                light_intensity: 1.0,
+                resolution: RenderResolution::Native,
+                quality: HbtrQuality::Medium,
+                shader_mtimes: vec![None; WATCHED_SHADERS.len()],
+                frame: 0,
+                last_counts: (0, 0, 0),
+                error_message: None,
+            };
+
+            if let Err(error) = platform::run(config, editor) {
+                error!(%error, "editor event loop failed");
+            }
+        });
+    match runner {
+        Ok(handle) => {
+            if let Err(error) = handle.join() {
+                error!("editor worker thread panicked: {error:?}");
+            }
         }
-    };
-
-    let config = WindowConfig {
-        title: "HBD Editor".to_owned(),
-        width: 1280,
-        height: 720,
-        resizable: true,
-        continuous_redraw: true,
-        max_frames: None,
-    };
-    let editor = Editor {
-        renderer: None,
-        imgui,
-        platform,
-        ash_renderer: None,
-        pending_retirement: None,
-        selection: Selection::Scene,
-        camera_position: [9.0, 4.5, 0.0],
-        light_direction: [0.35, 0.85, 0.4],
-        light_intensity: 1.0,
-        resolution: RenderResolution::Native,
-        quality: HbtrQuality::Medium,
-        shader_mtimes: vec![None; WATCHED_SHADERS.len()],
-        frame: 0,
-        last_counts: (0, 0, 0),
-        error_message: None,
-    };
-
-    if let Err(error) = platform::run(config, editor) {
-        error!(%error, "editor event loop failed");
+        Err(error) => error!(%error, "failed to spawn editor worker thread"),
     }
 }
